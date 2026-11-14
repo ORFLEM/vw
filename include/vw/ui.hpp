@@ -291,6 +291,9 @@ struct StackProps {
   float radius = 0.0F;
   Placement place;
   Input input;
+  // Children are clipped to the stack's box and radius, drawing and input;
+  // false lets them overflow it (shadows, popovers).
+  bool clip = true;
 };
 
 struct ScrollProps {

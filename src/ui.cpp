@@ -16,6 +16,8 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <tuple>
+#include <utility>
 
 #include "vws.hpp"
 
@@ -125,6 +127,7 @@ void combine_clip(Rectangle& rectangle, const std::array<float, 4>& parent, floa
   if (clip[2] <= 0.0F || clip[3] <= 0.0F) {
     rectangle.visible = false;
     rectangle.raster_visible = false;
+    rectangle.clipped_out = true;
     return;
   }
   const auto reaches = [&clip](const std::array<float, 4>& box) {
@@ -154,6 +157,7 @@ void clip_range(Scene& scene, std::size_t begin, std::size_t end,
         rectangle.x + rectangle.width <= clip[0] || rectangle.y + rectangle.height <= clip[1]) {
       rectangle.visible = false;
       rectangle.raster_visible = false;
+      rectangle.clipped_out = true;
     }
   }
   for (Interaction& interaction : scene.interactions) {
@@ -182,6 +186,30 @@ std::size_t first_begin(std::span<const Widget> children) {
 void grow_scene(Scene& scene, float right, float bottom) {
   scene.width = std::max(scene.width, static_cast<std::uint32_t>(std::ceil(right)));
   scene.height = std::max(scene.height, static_cast<std::uint32_t>(std::ceil(bottom)));
+}
+
+// How far the content reaches, minus what clips cut away, so a surface sized
+// by its content keeps its size while clipped children move (bars bleeding
+// out of a card). Hit areas count: they take up room without drawing.
+std::pair<std::uint32_t, std::uint32_t> content_extent(const Scene& scene) {
+  float right = 1.0F;
+  float bottom = 1.0F;
+  for (const Rectangle& rectangle : scene.rectangles) {
+    if (rectangle.clipped_out) continue;
+    float edge_x = rectangle.x + rectangle.width;
+    float edge_y = rectangle.y + rectangle.height;
+    if (rectangle.clip[2] > 0.0F && rectangle.clip[3] > 0.0F) {
+      edge_x = std::min(edge_x, rectangle.clip[0] + rectangle.clip[2]);
+      edge_y = std::min(edge_y, rectangle.clip[1] + rectangle.clip[3]);
+    }
+    right = std::max(right, edge_x);
+    bottom = std::max(bottom, edge_y);
+  }
+  for (const ScrollArea& area : scene.scroll_areas) {
+    right = std::max(right, area.x + area.width);
+    bottom = std::max(bottom, area.y + area.height);
+  }
+  return {static_cast<std::uint32_t>(std::ceil(right)), static_cast<std::uint32_t>(std::ceil(bottom))};
 }
 
 std::unordered_map<std::string, std::shared_ptr<TextFieldState>>& text_field_states() {
@@ -740,6 +768,17 @@ Widget Ui::stack(std::span<const Widget> children, const StackProps& props) {
     shift(scene_, child, style.x + x, style.y + y);
   }
   const std::size_t begin = first_begin(children);
+  if (props.clip) {
+    // Nested rectangles stay inside the one under them, rounded corners too.
+    const std::array<float, 4> box{style.x, style.y, width, height};
+    for (std::size_t index = begin; index < scene_.rectangles.size(); ++index)
+      combine_clip(scene_.rectangles[index], box, style.radius);
+    for (Interaction& interaction : scene_.interactions)
+      if (interaction.begin >= begin) {
+        interaction.clip = intersect_clip(interaction.clip, box);
+        interaction.enabled = interaction.enabled && interaction.clip[2] > 0.0F && interaction.clip[3] > 0.0F;
+      }
+  }
   if (style.clip[2] > 0.0F && style.clip[3] > 0.0F)
     clip_range(scene_, begin, scene_.rectangles.size(), style.clip);
   if (!style.visible)
@@ -936,8 +975,9 @@ void Ui::surface(const SurfaceProps& props) {
     if (fill) return std::max<std::uint32_t>(1, configured_size != 0 ? configured_size : content);
     return surface_dimension(requested.value_or(static_cast<float>(content)), "surface");
   };
-  scene_.width = dimension(props.width, scene_.width, configured.width, scene_.fill_width);
-  scene_.height = dimension(props.height, scene_.height, configured.height, scene_.fill_height);
+  const auto [content_width, content_height] = content_extent(scene_);
+  scene_.width = dimension(props.width, content_width, configured.width, scene_.fill_width);
+  scene_.height = dimension(props.height, content_height, configured.height, scene_.fill_height);
   scene_.surface_configured = true;
   scene_.focus_grab = props.focus_grab;
   scene_.on_focus_activated = props.on_activated;
@@ -1025,22 +1065,7 @@ void Ui::finish() {
     throw std::runtime_error("the scene did not create any widgets");
   if (scene.focus_grab && (scene.toplevel || scene.session_lock))
     throw std::runtime_error("focus_grab requires a layer-shell surface");
-  if (!scene.scroll_areas.empty() && !scene.surface_configured) {
-    scene.width = 1;
-    scene.height = 1;
-    for (const Rectangle& rectangle : scene.rectangles) {
-      if (!rectangle.visible && !rectangle.raster_visible) continue;
-      float right = rectangle.x + rectangle.width;
-      float bottom = rectangle.y + rectangle.height;
-      if (rectangle.clip[2] > 0.0F && rectangle.clip[3] > 0.0F) {
-        right = std::min(right, rectangle.clip[0] + rectangle.clip[2]);
-        bottom = std::min(bottom, rectangle.clip[1] + rectangle.clip[3]);
-      }
-      grow_scene(scene, std::max(0.0F, right), std::max(0.0F, bottom));
-    }
-    for (const ScrollArea& area : scene.scroll_areas)
-      grow_scene(scene, area.x + area.width, area.y + area.height);
-  }
+  if (!scene.surface_configured) std::tie(scene.width, scene.height) = content_extent(scene);
   if (scene.toplevel) {
     scene.width = scene.toplevel_width;
     scene.height = scene.toplevel_height;

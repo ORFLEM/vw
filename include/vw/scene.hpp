@@ -129,6 +129,8 @@ struct Rectangle {
   bool exact_coverage = false;
   bool visible = true;
   bool raster_visible = true;
+  // A clip cut it away entirely: it neither draws nor sizes its surface.
+  bool clipped_out = false;
   std::string shader;
   std::array<float, 4> shader_params{0.0F, 0.0F, 0.0F, 0.0F};
   std::vector<float> shader_data;

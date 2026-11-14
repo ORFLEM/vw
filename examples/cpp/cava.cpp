@@ -1,6 +1,7 @@
-// An audio visualizer from cava: rounded bars inside a rounded card. Loud
-// bars overshoot the card on purpose: the card clips them, rounded corners
-// included, and the bars move every frame without the clip flickering.
+// An audio visualizer from cava: rounded bars inside a rounded card. The bars
+// bleed past every edge on purpose (the outer bars hang off the sides, all of
+// them run below the bottom, loud ones past the top), so the card visibly
+// clips them to its rounded shape, corners included, every frame.
 //
 //   cmake --build build && ./build/vw-example-cava
 //
@@ -128,9 +129,10 @@ int main() {
     constexpr float width = 420;
     constexpr float height = 120;
     constexpr float radius = 28;
-    constexpr float padding = 14;
     constexpr float gap = 5;
-    const float bar_width = (width - 2 * padding - gap * (bar_count - 1)) / bar_count;
+    // How far the bars' box reaches past the card on each side.
+    constexpr float bleed = 18;
+    const float bar_width = (width + 2 * bleed - gap * (bar_count - 1)) / bar_count;
 
     const vw::Widget card = ui.rectangle({.width = width, .height = height, .radius = radius,
                                           .color = vw::rgba(0x151a1ee6), .border_width = 1,
@@ -142,17 +144,18 @@ int main() {
     } else {
       std::vector<vw::Widget> bars;
       for (int index = 0; index < bar_count; ++index) {
-        // Up to 1.4x the card: the loudest bars run past its edge.
+        // From below the card's bottom edge to up to 1.4x its height.
         const float level = cava.bars[static_cast<std::size_t>(index)];
-        const float bar_height = std::max(bar_width, level * height * 1.4F);
+        const float bar_height = bleed + std::max(bar_width, level * height * 1.4F);
         const float hue = static_cast<float>(index) / (bar_count - 1);
         bars.push_back(ui.rectangle({.width = bar_width, .height = bar_height, .radius = bar_width / 2,
                                      .color = vw::Color{0.65F + 0.25F * hue, 0.80F - 0.25F * hue, 0.95F, 1.0F},
                                      .color2 = vw::Color{0.40F + 0.20F * hue, 0.55F, 0.90F - 0.20F * hue, 1.0F},
                                      .gradient = vw::Gradient::vertical}));
       }
-      // Bottom-aligned: loud bars grow past the card's top edge.
-      content = ui.row(bars, {.gap = gap, .padding = padding, .width = width, .height = height,
+      // A box larger than the card, centred on it: the stack below cuts
+      // what lies outside.
+      content = ui.row(bars, {.gap = gap, .width = width + 2 * bleed, .height = height + 2 * bleed,
                               .align = vw::Align::end});
     }
     // The card clips everything on it to its rounded shape.

@@ -36,7 +36,7 @@ const vw::Widget label = ui.text({.text = "68%", .size = 14});
 ui.row({icon, label}, {.gap = 8, .padding = 10, .radius = 18, .place = {.x = 12, .y = 6}});
 ```
 
-`row` and `column` take children and `LayoutProps` (`gap`, `padding`, optional fixed `width`/`height`, `justify`, `align`, `radius`, `place`, `input`). `stack` overlays children in one box. Each returns one widget covering everything, which you can lay out again.
+`row` and `column` take children and `LayoutProps` (`gap`, `padding`, optional fixed `width`/`height`, `justify`, `align`, `radius`, `place`, `input`). `stack` overlays children in one box (`StackProps`: `width`, `height`, `radius`, `place`, `input`, `clip`), centred unless they are anchored, and clips them to that box and its `radius` — a rectangle laid on a rounded one stays inside it. `.clip = false` lets them overflow, for shadows or popovers. Each returns one widget covering everything, which you can lay out again.
 
 When a fixed `width` (row) or `height` (column) leaves room, `justify` places the children along the axis:
 
