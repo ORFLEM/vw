@@ -104,6 +104,38 @@ std::array<float, 4> intersect_clip(const std::array<float, 4>& previous,
           std::max(0.0F, std::min(previous[1] + previous[3], viewport[1] + viewport[3]) - top)};
 }
 
+// Combines a child's clip with its group's. A clip has one radius, so the
+// larger radius of the boxes whose edges the result reaches applies; edges
+// within half a pixel count as reached, so children that move every frame do
+// not flip between square and rounded corners. An empty result hides the
+// primitive: a zero-sized clip would otherwise mean no clip at all.
+void combine_clip(Rectangle& rectangle, const std::array<float, 4>& parent, float parent_radius) {
+  if (rectangle.clip[2] <= 0.0F || rectangle.clip[3] <= 0.0F) {
+    rectangle.clip = parent;
+    rectangle.clip_radius = parent_radius;
+    return;
+  }
+  const std::array<float, 4> inner = rectangle.clip;
+  const float inner_radius = rectangle.clip_radius;
+  rectangle.clip = intersect_clip(inner, parent);
+  const auto& clip = rectangle.clip;
+  if (clip[2] <= 0.0F || clip[3] <= 0.0F) {
+    rectangle.visible = false;
+    rectangle.raster_visible = false;
+    return;
+  }
+  const auto reaches = [&clip](const std::array<float, 4>& box) {
+    constexpr float tolerance = 0.5F;
+    return std::abs(clip[0] - box[0]) < tolerance || std::abs(clip[1] - box[1]) < tolerance ||
+           std::abs(clip[0] + clip[2] - box[0] - box[2]) < tolerance ||
+           std::abs(clip[1] + clip[3] - box[1] - box[3]) < tolerance;
+  };
+  float radius = 0.0F;
+  if (reaches(inner)) radius = std::max(radius, inner_radius);
+  if (reaches(parent)) radius = std::max(radius, parent_radius);
+  rectangle.clip_radius = radius;
+}
+
 // Clips every primitive, interaction and scroll area in [begin, end) to the
 // viewport, hiding anything that ends up fully outside it.
 void clip_range(Scene& scene, std::size_t begin, std::size_t end,
@@ -648,16 +680,8 @@ Widget Ui::close_group(std::span<const Widget> children, float width, float heig
   for (std::size_t index = group.begin; index < group.end; ++index) {
     auto& rectangle = scene_.rectangles[index];
     // A child clipped already (ui.clip, place.clip, a nested layout) keeps
-    // that clip inside the group's; only one radius fits, so the box that
-    // bounds the result gives it.
-    if (rectangle.clip[2] > 0.0F && rectangle.clip[3] > 0.0F) {
-      const auto inner = rectangle.clip;
-      rectangle.clip = intersect_clip(inner, parent_clip);
-      if (rectangle.clip != inner) rectangle.clip_radius = style.radius;
-    } else {
-      rectangle.clip = parent_clip;
-      rectangle.clip_radius = style.radius;
-    }
+    // that clip inside the group's.
+    combine_clip(rectangle, parent_clip, style.radius);
     rectangle.anchor = style.anchor;
     rectangle.layer = style.layer;
     rectangle.margin = style.margin;
