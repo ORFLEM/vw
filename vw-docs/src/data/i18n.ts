@@ -150,6 +150,7 @@ const labels: Record<string, string> = {
   Elements: 'Элементы',
   Controls: 'Элементы управления',
   'C++ in Facet': 'C++ в Facet',
+  'Plugins': 'Плагины',
 };
 
 export function label(text: string, locale: Locale) {

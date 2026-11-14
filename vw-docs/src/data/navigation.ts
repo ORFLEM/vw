@@ -107,6 +107,7 @@ export const tabs: Tab[] = [
     ]},
     {label: 'Integration', icon: 'services', items: [
       {label: 'C++ in Facet', slug: 'facet/cpp'},
+      {label: 'Plugins', slug: 'facet/plugins'},
     ]},
   ]},
 ];

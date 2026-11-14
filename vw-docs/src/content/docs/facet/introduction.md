@@ -1,9 +1,9 @@
 ---
 title: What Facet is
-description: A declarative view language for vw that compiles to C++ — no interpreter, no runtime tree, and clang checks every use of your state.
+description: A declarative view language for vw that compiles to C++ — no runtime tree, and clang checks every use of your state. Plugins can load it at runtime instead.
 ---
 
-Facet describes views the way QML does, and compiles them ahead of time into the same C++ you would write by hand against `vw::Ui`. There is no interpreter and no object tree at runtime: a view is a function vw calls on every build.
+Facet describes views the way QML does, and compiles them ahead of time into the same C++ you would write by hand against `vw::Ui`. There is no object tree at runtime: a view is a function vw calls on every build. For plugins, the same files can also be [loaded and interpreted at runtime](/facet/plugins/).
 
 ```facet
 let [ vw.ui as ui, vw.layout as layout ] in
