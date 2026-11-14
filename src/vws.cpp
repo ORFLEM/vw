@@ -1,10 +1,22 @@
 #include "vws.hpp"
 
+#include <sys/wait.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <array>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <format>
+#include <fstream>
+#include <iterator>
+#include <atomic>
+#include <mutex>
+#include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace vw::vws {
 namespace {
@@ -203,6 +215,162 @@ std::string validate(const Interface& interface, std::uint16_t& flags) {
   }
   if (!target) return "binding 0 (the target image) is never declared, so the shader cannot draw";
   return {};
+}
+
+namespace {
+
+std::vector<std::uint8_t> read_bytes(const std::filesystem::path& path) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) throw std::runtime_error("cannot read " + path.string());
+  return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+
+std::string trim(std::string value) {
+  const auto first = value.find_first_not_of(" \t\r");
+  if (first == std::string::npos) return {};
+  const auto last = value.find_last_not_of(" \t\r");
+  return value.substr(first, last - first + 1);
+}
+
+// "// @vw name: X" and "// @vw params: a, b, c" lines.
+void read_metadata(const std::string& source, Shader& shader) {
+  std::istringstream lines(source);
+  for (std::string line; std::getline(lines, line);) {
+    const auto at = line.find("@vw ");
+    if (at == std::string::npos || line.find("//") > at) continue;
+    const std::string rest = line.substr(at + 4);
+    const auto colon = rest.find(':');
+    if (colon == std::string::npos) continue;
+    const std::string key = trim(rest.substr(0, colon));
+    const std::string value = trim(rest.substr(colon + 1));
+    if (key == "name") {
+      shader.name = value;
+    } else if (key == "params") {
+      shader.params.clear();
+      std::istringstream names(value);
+      for (std::string name; std::getline(names, name, ',');)
+        if (!trim(name).empty()) shader.params.push_back(trim(name));
+      if (shader.params.size() > max_params)
+        throw std::runtime_error("'@vw params' names " + std::to_string(shader.params.size()) +
+                                 " parameters; shader_params holds 4");
+    }
+  }
+}
+
+// `#define VW_USE_TIME` on a line of its own, as the other VW_USE_ switches.
+bool uses_time(const std::string& source) {
+  std::istringstream lines(source);
+  for (std::string line; std::getline(lines, line);) {
+    std::istringstream words(line);
+    std::string directive, name;
+    words >> directive >> name;
+    if ((directive == "#define" && name == "VW_USE_TIME") ||
+        (directive == "#" && name == "define" && (words >> name) && name == "VW_USE_TIME"))
+      return true;
+  }
+  return false;
+}
+
+int run(const std::vector<std::string>& argv) {
+  std::vector<char*> arguments;
+  for (const auto& argument : argv) arguments.push_back(const_cast<char*>(argument.c_str()));
+  arguments.push_back(nullptr);
+  const pid_t child = fork();
+  if (child < 0) throw std::runtime_error("cannot start " + argv.front());
+  if (child == 0) {
+    execvp(arguments.front(), arguments.data());
+    std::fprintf(stderr, "vw: cannot run %s\n", arguments.front());
+    _exit(127);
+  }
+  int status = 0;
+  while (waitpid(child, &status, 0) < 0) {
+  }
+  return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+}
+
+}  // namespace
+
+bool is_glsl(std::span<const std::uint8_t> bytes) {
+  return !bytes.empty() && !is_vws(bytes) && !is_spirv(bytes);
+}
+
+Shader compile(const std::string& source_path, const CompileOptions& options) {
+  const std::filesystem::path input(source_path);
+  Shader shader;
+  shader.name = input.stem().string();
+  const auto bytes = read_bytes(input);
+  const std::string source(bytes.begin(), bytes.end());
+  read_metadata(source, shader);
+  if (!options.name.empty()) shader.name = options.name;
+
+  std::string glslc = options.glslc;
+  if (glslc.empty()) {
+    const char* environment = std::getenv("VW_GLSLC");
+    glslc = environment != nullptr && *environment != '\0' ? environment : "glslc";
+  }
+  // Beside the system's temporary files, unique per process and call.
+  static std::atomic<unsigned> counter{0};
+  const std::filesystem::path compiled = std::filesystem::temp_directory_path() /
+      std::format("vw-shader-{}-{}.spv", getpid(), counter++);
+  std::vector<std::string> command{glslc, "-fshader-stage=compute", "--target-env=vulkan1.0", "-O"};
+  for (const auto& directory : options.includes) command.push_back("-I" + directory);
+#ifdef VW_SHADER_INCLUDE_DIRS
+  // vw's own headers, so `#include <vw/shader.glsl>` always resolves.
+  std::istringstream builtin(VW_SHADER_INCLUDE_DIRS);
+  for (std::string directory; std::getline(builtin, directory, ':');)
+    if (!directory.empty()) command.push_back("-I" + directory);
+#endif
+  for (const auto& define : options.defines) command.push_back("-D" + define);
+  if (!options.depfile.empty())
+    command.insert(command.end(), {"-MD", "-MF", options.depfile, "-MT", options.depfile_target});
+  command.insert(command.end(), {input.string(), "-o", compiled.string()});
+  const int status = run(command);
+  std::error_code ignored;
+  if (status != 0) {
+    std::filesystem::remove(compiled, ignored);
+    throw std::runtime_error(std::format("glslc failed for {}", input.string()));
+  }
+  const auto code = read_bytes(compiled);
+  std::filesystem::remove(compiled, ignored);
+  if (!is_spirv(code)) throw std::runtime_error("glslc did not produce SPIR-V");
+  shader.spirv.resize(code.size() / 4);
+  std::memcpy(shader.spirv.data(), code.data(), code.size());
+
+  const std::string problem = validate(inspect(shader.spirv), shader.flags);
+  if (!problem.empty()) throw std::runtime_error(input.string() + ": " + problem);
+  if (uses_time(source)) shader.flags |= animated;
+  return shader;
+}
+
+std::uint16_t peek_flags(const std::string& path) {
+  struct Entry {
+    std::filesystem::file_time_type modified;
+    std::uint16_t flags = 0;
+  };
+  static std::mutex mutex;
+  static std::unordered_map<std::string, Entry> cache;
+  std::error_code error;
+  const auto modified = std::filesystem::last_write_time(path, error);
+  if (error) return 0;
+  const std::lock_guard lock(mutex);
+  if (const auto found = cache.find(path); found != cache.end() && found->second.modified == modified)
+    return found->second.flags;
+  std::uint16_t flags = 0;
+  try {
+    const auto bytes = read_bytes(path);
+    if (is_vws(bytes)) {
+      flags = decode(bytes).flags;
+    } else if (is_spirv(bytes)) {
+      flags = reads_backdrop | reads_data;
+    } else {
+      const std::string source(bytes.begin(), bytes.end());
+      if (uses_time(source)) flags |= animated;
+    }
+  } catch (const std::exception&) {
+    flags = 0;
+  }
+  cache[path] = Entry{modified, flags};
+  return flags;
 }
 
 }  // namespace vw::vws

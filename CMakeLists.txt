@@ -180,7 +180,9 @@ if(VW_STATIC)
 endif()
 # Built-in shaders are embedded (vw_builtin_shaders.hpp); VW_SHADER_DIR can
 # point at newer .vws files while working on them.
-target_compile_definitions(vw_core PRIVATE VW_VERSION="${PROJECT_VERSION}")
+target_compile_definitions(vw_core PRIVATE VW_VERSION="${PROJECT_VERSION}"
+  # Shaders compiled at runtime find <vw/shader.glsl> here.
+  VW_SHADER_INCLUDE_DIRS="${CMAKE_CURRENT_SOURCE_DIR}/include:${CMAKE_INSTALL_FULL_INCLUDEDIR}")
 target_compile_options(vw_core PRIVATE -Wall -Wextra -Wpedantic)
 
 install(TARGETS vw_core vw-shaderc EXPORT vwTargets

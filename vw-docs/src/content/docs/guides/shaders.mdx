@@ -50,6 +50,36 @@ ui.rectangle({.width = 420, .height = 220, .radius = 32, .color = vw::rgba(0x1b2
 
 The pipeline is cached by path and modification time: recompile while the program runs and the next frame uses the new shader. Plain `.spv` files still load, but vw then has to assume they read everything.
 
+### Straight from source
+
+`.shader` also takes the GLSL file itself. vw compiles it on first use, with the same checks as `vw-shaderc`, and keeps the result in `~/.cache/vw/shaders` (`$XDG_CACHE_HOME`) for the next run:
+
+```cpp
+ui.rectangle({.width = 420, .height = 220, .shader = "/path/to/tint.comp"});
+```
+
+Save the file and the next frame compiles and uses it, so a shell can let its users drop in their own shaders. glslc must be installed at runtime (`$VW_GLSLC` or `PATH`). A shader that does not compile is reported once on stderr, with glslc's errors, and the rectangle is drawn plainly until the file is fixed. The cache follows the shader file's own time, not the files it `#include`s: touch the shader after editing an include.
+
+## Animate it
+
+`#define VW_USE_TIME` gives the shader `vw_time()`, seconds since the app started drawing. While such a shader is on screen, its surface draws every frame; when it is gone, vw goes back to drawing only on change.
+
+```glsl
+#version 450
+#define VW_USE_TIME
+#include <vw/shader.glsl>
+
+void main() {
+  ivec2 pixel; vec2 local;
+  if (!vw_begin(pixel, local)) return;
+  float d = vw_rounded_box(local - vw_size() * 0.5, vw_size() * 0.5, vw_radius());
+  float wave = 0.5 + 0.5 * sin(vw_time() * 2.0 + local.x / 40.0);
+  vw_blend(pixel, vw_premultiply(mix(vw.color, vw.color2, wave), vw_coverage(d)));
+}
+```
+
+Every shader in a frame sees the same time, so several animated rectangles stay in step.
+
 ## The .vws format
 
 A `.vws` file is little-endian:
@@ -58,7 +88,7 @@ A `.vws` file is little-endian:
 | --- | --- |
 | 4 | magic `VWS1` |
 | 2 | format version (1) |
-| 2 | flags: bit 0 reads the backdrop, bit 1 reads `shader_data` |
+| 2 | flags: bit 0 reads the backdrop, bit 1 reads `shader_data`, bit 2 reads the time |
 | 4 | SPIR-V length in words |
 | 4 | CRC-32 of the SPIR-V |
 | 1 + n | name |
@@ -66,7 +96,7 @@ A `.vws` file is little-endian:
 | 0–3 | padding to 4 bytes |
 | 4 × words | SPIR-V |
 
-The flags are derived from the bindings the compiled module declares, never typed by hand. The checksum catches truncated or corrupt files with a clear error. vw's own shaders are compiled the same way and embedded in the library, so nothing is searched for at runtime; `VW_SHADER_DIR` can point at newer `rounded_rect.vws`/`raster.vws` while you work on them.
+The flags are derived from the bindings the compiled module declares and from `VW_USE_TIME`, never typed by hand. The checksum catches truncated or corrupt files with a clear error. vw's own shaders are compiled the same way and embedded in the library, so nothing is searched for at runtime; `VW_SHADER_DIR` can point at newer `rounded_rect.vws`/`raster.vws` while you work on them.
 
 ## What vw provides
 
@@ -80,6 +110,7 @@ The flags are derived from the bindings the compiled module declares, never type
 | `vw_blend(pixel, premultiplied)`, `vw_premultiply(color, amount)` | compositing |
 | `vw_data(i)`, `vw_data_length()` | `shader_data`, with `VW_USE_DATA` |
 | `vw_backdrop(pixel)` | what was drawn before, with `VW_USE_BACKDROP` |
+| `vw_time()` | seconds since the app started drawing, with `VW_USE_TIME` |
 
 <Callout type="tip" title="Only ask for the backdrop when you sample it">
 The backdrop is a copy of the whole surface made just before your rectangle draws. Without `VW_USE_BACKDROP` the shader never declares it, the `.vws` says so, and vw skips the copy — for a shell drawn with one big shader, that is a full-surface copy saved every frame.

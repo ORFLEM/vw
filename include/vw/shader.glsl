@@ -4,6 +4,7 @@
 //   #version 450
 //   #define VW_USE_BACKDROP   // only if you sample what was drawn before
 //   #define VW_USE_DATA       // only if you read shader_data
+//   #define VW_USE_TIME       // only if you read vw_time(): redraws every frame
 //   #include <vw/shader.glsl>
 //
 //   void main() {
@@ -32,7 +33,7 @@ layout(push_constant) uniform VwRectangle {
   vec4 color2;
   vec4 border_color;
   vec4 clip;           // x, y, width, height; width 0 means no clip
-  vec4 clip_params;    // clip radius, data offset (words), data length, 0
+  vec4 clip_params;    // clip radius, data offset (words), data length, time
   vec4 shader_params;  // RectangleProps::shader_params
 } vw;
 
@@ -52,6 +53,13 @@ layout(rgba8, set = 0, binding = 2) readonly uniform image2D vw_backdrop_image;
 vec4 vw_backdrop(ivec2 pixel) {
   return imageLoad(vw_backdrop_image, clamp(pixel, ivec2(0), imageSize(vw_backdrop_image) - 1));
 }
+#endif
+
+#ifdef VW_USE_TIME
+// Seconds since the app started drawing, the same for every shader in a
+// frame. While a shader that reads it is on screen, its surface redraws
+// every frame.
+float vw_time() { return vw.clip_params.w; }
 #endif
 
 vec2 vw_size() { return vw.bounds.zw; }

@@ -1,4 +1,5 @@
 #include "vw/ui.hpp"
+#include "vw/animation.hpp"
 #include "vw/canvas.hpp"
 #include "vw/host.hpp"
 #include "vw/icon.hpp"
@@ -15,6 +16,8 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+
+#include "vws.hpp"
 
 namespace vw {
 namespace {
@@ -286,6 +289,12 @@ Widget Ui::rectangle(const RectangleProps& props) {
   rectangle.border_color = clamped(props.border_color);
   rectangle.gradient = static_cast<std::uint32_t>(props.gradient);
   rectangle.shader = props.shader;
+  // A shader reading vw_time() keeps its surface drawing every frame.
+  if (!props.shader.empty() && rectangle.visible &&
+      (vws::peek_flags(props.shader) & vws::animated) != 0) {
+    request_animation_continuation();
+    scene_.shader_time = true;
+  }
   for (float parameter : props.shader_params)
     if (!std::isfinite(parameter)) throw std::invalid_argument("shader parameters must be finite");
   rectangle.shader_params = props.shader_params;

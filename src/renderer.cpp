@@ -5,11 +5,15 @@
 #include <array>
 #include <algorithm>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <format>
 #include <fstream>
+#include <functional>
+#include <iostream>
 #include <iterator>
 #include <stdexcept>
 #include <span>
@@ -90,6 +94,55 @@ std::uint32_t memory_type(VkPhysicalDevice physical_device, std::uint32_t allowe
   throw std::runtime_error("no compatible Vulkan memory type");
 }
 
+// Where compiled GLSL is kept between runs: $XDG_CACHE_HOME/vw/shaders.
+std::filesystem::path shader_cache_directory() {
+  if (const char* cache = std::getenv("XDG_CACHE_HOME"); cache != nullptr && *cache != '\0')
+    return std::filesystem::path(cache) / "vw/shaders";
+  if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0')
+    return std::filesystem::path(home) / ".cache/vw/shaders";
+  return std::filesystem::temp_directory_path() / "vw-shaders";
+}
+
+// A .vws or SPIR-V file as it is; GLSL source compiled through vw-shaderc's
+// code, reusing the cached .vws while it is newer than the source.
+LoadedShader load_or_compile(const std::string& path, std::filesystem::file_time_type modified) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) throw std::runtime_error("could not open shader " + path);
+  const std::vector<std::uint8_t> bytes{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+  if (!vws::is_glsl(bytes)) return load_shader(bytes, path);
+
+  const std::string absolute = std::filesystem::absolute(path).string();
+  const std::filesystem::path cached =
+      shader_cache_directory() / std::format("{:016x}.vws", std::hash<std::string>{}(absolute));
+  std::error_code error;
+  const auto cached_time = std::filesystem::last_write_time(cached, error);
+  if (!error && cached_time >= modified) {
+    try {
+      return load_shader_file(cached);
+    } catch (const std::exception&) {
+      // A torn or stale cache entry: compile again below.
+    }
+  }
+  const vws::Shader shader = vws::compile(path);
+  std::filesystem::create_directories(cached.parent_path(), error);
+  if (!error) {
+    const auto encoded = vws::encode(shader);
+    const std::filesystem::path temporary = cached.string() + std::format(".{}.tmp", getpid());
+    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+    output.write(reinterpret_cast<const char*>(encoded.data()), static_cast<std::streamsize>(encoded.size()));
+    output.close();
+    if (output) std::filesystem::rename(temporary, cached, error);
+    else std::filesystem::remove(temporary, error);
+  }
+  return {shader.spirv, shader.flags};
+}
+
+// Seconds since vw started drawing: vw_time() in shaders.
+float shader_time() {
+  static const auto start = std::chrono::steady_clock::now();
+  return std::chrono::duration<float>(std::chrono::steady_clock::now() - start).count();
+}
+
 struct PushConstants {
   std::array<float, 4> bounds;
   std::array<float, 4> params;
@@ -128,17 +181,33 @@ struct Renderer::State {
     VkPipeline pipeline = VK_NULL_HANDLE;
     std::filesystem::file_time_type modified;
     std::uint16_t flags = 0;
+    // False for the plain rectangle pipeline standing in for a broken shader.
+    bool owned = true;
   };
   std::unordered_map<std::string, ShaderPipeline> custom_pipelines;
 
-  // A custom shader's pipeline and what it reads; rebuilt when the file changes.
+  // A custom shader's pipeline and what it reads; rebuilt when the file
+  // changes. GLSL source is compiled on first use. A shader that does not
+  // load is reported once per version of the file and drawn as a plain
+  // rectangle, so a typo while editing does not take the surface down.
   ShaderPipeline rectangle_pipeline(const std::string& path) {
-    if (path.empty()) return {pipeline, {}, 0};
-    const auto modified = std::filesystem::last_write_time(path);
+    if (path.empty()) return {pipeline, {}, 0, false};
+    std::error_code error;
+    const auto modified = std::filesystem::last_write_time(path, error);
     const auto found = custom_pipelines.find(path);
-    if (found != custom_pipelines.end() && found->second.modified == modified)
+    if (found != custom_pipelines.end() && (error || found->second.modified == modified))
       return found->second;
-    const LoadedShader loaded = load_shader_file(path);
+    LoadedShader loaded;
+    try {
+      if (error) throw std::runtime_error("could not open shader " + path);
+      loaded = load_or_compile(path, modified);
+    } catch (const std::exception& failure) {
+      std::cerr << "vw: " << failure.what() << '\n';
+      if (found != custom_pipelines.end() && found->second.owned)
+        vkDestroyPipeline(device, found->second.pipeline, nullptr);
+      custom_pipelines[path] = ShaderPipeline{pipeline, modified, 0, false};
+      return custom_pipelines[path];
+    }
     const auto& code = loaded.spirv;
     const VkShaderModuleCreateInfo module_info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
         nullptr, 0, code.size() * sizeof(std::uint32_t), code.data()};
@@ -152,8 +221,9 @@ struct Renderer::State {
     const VkResult result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &info, nullptr, &created);
     vkDestroyShaderModule(device, module, nullptr);
     check(result, "vkCreateComputePipelines(custom)");
-    if (found != custom_pipelines.end()) vkDestroyPipeline(device, found->second.pipeline, nullptr);
-    custom_pipelines[path] = ShaderPipeline{created, modified, loaded.flags};
+    if (found != custom_pipelines.end() && found->second.owned)
+      vkDestroyPipeline(device, found->second.pipeline, nullptr);
+    custom_pipelines[path] = ShaderPipeline{created, modified, loaded.flags, true};
     return custom_pipelines[path];
   }
 
@@ -273,6 +343,8 @@ Frame Renderer::render(const Scene& scene) const {
   // Whether each rectangle's shader samples the backdrop (binding 2); only
   // those pay for the full-surface copy.
   std::vector<bool> reads_backdrop;
+  // One time for every shader in the frame, so they move together.
+  const float time = shader_time();
   rectangle_pipelines.reserve(scene.rectangles.size());
   reads_backdrop.reserve(scene.rectangles.size());
   for (const Rectangle& rectangle : scene.rectangles) {
@@ -545,7 +617,7 @@ Frame Renderer::render(const Scene& scene) const {
                                rectangle.color, rectangle.color2, rectangle.border_color,
                                 rectangle.clip,
                                 {rectangle.clip_radius, static_cast<float>(data_offsets[rectangle_index]),
-                                 static_cast<float>(rectangle.shader_data.size()), 0.0F},
+                                 static_cast<float>(rectangle.shader_data.size()), time},
                                 shader_params};
       vkCmdPushConstants(command, state_->pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                          sizeof(push), &push);

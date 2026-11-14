@@ -140,7 +140,9 @@ struct RectangleProps {
   Color border_color{1.0F, 1.0F, 1.0F, 1.0F};
   // top-left, top-right, bottom-right, bottom-left; unset inherits radius.
   std::array<std::optional<float>, 4> corner_radii{};
-  // Path to a SPIR-V compute shader.
+  // A compute shader: a .vws file (vw-shaderc), SPIR-V, or GLSL source, which
+  // is compiled on first use and again when it changes (glslc must be on
+  // PATH, or set VW_GLSLC). See the shaders guide.
   std::string shader;
   std::array<float, 4> shader_params{};
   // More data than shader_params holds (point lists, curves): the shader

@@ -1332,7 +1332,7 @@ void WaylandWidget::refresh_scene(bool input) {
     }
     // Rebuilds often change nothing visible (a service event, a clock that
     // has not ticked over): adopt the scene for its handlers, skip the frame.
-    if (configured_ && same_presentation(next, scene_)) {
+    if (configured_ && !next.shader_time && same_presentation(next, scene_)) {
       reload(next, Frame(0, 0, -1, 0, 0));
       return;
     }

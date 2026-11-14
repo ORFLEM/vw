@@ -331,6 +331,9 @@ struct Scene {
   bool mapped = true;
   // A tween or canvas asked for another frame during this build.
   bool animating = false;
+  // A shader on screen reads vw_time(): every frame draws, even when the
+  // scene itself did not change.
+  bool shader_time = false;
   // The compositor closed the surface (toplevel close, layer surface closed)
   // or a session lock was unlocked. Without a handler the app exits.
   CloseHandler on_closed;
