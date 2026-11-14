@@ -211,7 +211,7 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/vwConfig.cmake"
 
 option(VW_BUILD_EXAMPLES "Build the C++ examples" ON)
 if(VW_BUILD_EXAMPLES)
-  foreach(example bar launcher tasks status clock dock power calendar calculator)
+  foreach(example bar launcher tasks status clock dock power calendar calculator cava)
     add_executable(vw-example-${example} examples/cpp/${example}.cpp)
     target_link_libraries(vw-example-${example} PRIVATE vw::vw)
     # Props are designated initializers that omit defaulted fields on purpose.
