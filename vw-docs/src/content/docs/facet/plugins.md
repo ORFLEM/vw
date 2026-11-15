@@ -62,7 +62,7 @@ Handlers get their event as one object:
 
 | Handler | Argument |
 | --- | --- |
-| `on_click` | `{ x, y, button }` |
+| `on_click`, `on_right_click`, `on_middle_click` | `{ x, y, button, left, right, middle }` |
 | `on_scroll`, `on_scroll_x` | `{ x, y, delta }` |
 | `on_drag_start`, `on_drag`, `on_drag_end` | `{ x, y, start_x, start_y, dx, dy, delta_x, delta_y, button, cancelled }` |
 | `on_touch` | `{ phase, id, x, y, start_x, start_y, fingers }`, `phase` being `"down"`, `"motion"`, `"up"` or `"cancel"` |

@@ -864,7 +864,8 @@ class Builder {
     if (expr.kind != Expr::Kind::object) evaluator_.error(expr.at, "input is an object: { on_click: …, hover: { … } }");
     Value::Object fields;
     for (const auto& [field_name, field] : expr.fields) {
-      if (field_name == "on_click" || field_name == "on_hover" || field_name == "on_scroll" ||
+      if (field_name == "on_click" || field_name == "on_right_click" || field_name == "on_middle_click" ||
+          field_name == "on_hover" || field_name == "on_scroll" ||
           field_name == "on_scroll_x" || field_name == "on_touch" || field_name == "on_drag" ||
           field_name == "on_drag_start" || field_name == "on_drag_end") {
         fields[field_name] = Value(evaluator_.handler(*field, scope));
@@ -900,7 +901,8 @@ class Builder {
   vw::Input make_input(const Value& value) const {
     vw::Input result;
     const auto click = [](const vw::ClickEvent& e) {
-      return Value(Value::Object{{"x", e.x}, {"y", e.y}, {"button", e.button}});
+      return Value(Value::Object{{"x", e.x}, {"y", e.y}, {"button", e.button}, {"left", e.left()},
+                                 {"right", e.right()}, {"middle", e.middle()}});
     };
     const auto scroll = [](const vw::ScrollEvent& e) {
       return Value(Value::Object{{"x", e.x}, {"y", e.y}, {"delta", e.delta}});
@@ -917,6 +919,8 @@ class Builder {
                                  {"fingers", e.fingers}});
     };
     if (const Value& f = value["on_click"]; f.is_function()) result.on_click = adapt<vw::ClickEvent>(f, click);
+    if (const Value& f = value["on_right_click"]; f.is_function()) result.on_right_click = adapt<vw::ClickEvent>(f, click);
+    if (const Value& f = value["on_middle_click"]; f.is_function()) result.on_middle_click = adapt<vw::ClickEvent>(f, click);
     if (const Value& f = value["on_scroll"]; f.is_function()) result.on_scroll = adapt<vw::ScrollEvent>(f, scroll);
     if (const Value& f = value["on_scroll_x"]; f.is_function()) result.on_scroll_x = adapt<vw::ScrollEvent>(f, scroll);
     if (const Value& f = value["on_touch"]; f.is_function()) result.on_touch = adapt<vw::TouchEvent>(f, touch);

@@ -273,11 +273,17 @@ ClickHandler click_handler(FunctionRef function) {
   if (!function) return {};
   return [function](const ClickEvent& event) {
     function->call([&](lua_State* lua) {
-      lua_createtable(lua, 0, 3);
+      lua_createtable(lua, 0, 6);
       set_number(lua, "x", event.x);
       set_number(lua, "y", event.y);
       lua_pushinteger(lua, event.button);
       lua_setfield(lua, -2, "button");
+      lua_pushboolean(lua, event.left());
+      lua_setfield(lua, -2, "left");
+      lua_pushboolean(lua, event.right());
+      lua_setfield(lua, -2, "right");
+      lua_pushboolean(lua, event.middle());
+      lua_setfield(lua, -2, "middle");
       return 1;
     });
   };
@@ -349,6 +355,8 @@ FocusHandler focus_handler(FunctionRef function) {
 Input input(lua_State* lua, int table) {
   Input result;
   result.on_click = click_handler(function_field(lua, table, "on_click"));
+  result.on_right_click = click_handler(function_field(lua, table, "on_right_click"));
+  result.on_middle_click = click_handler(function_field(lua, table, "on_middle_click"));
   lua_getfield(lua, table, "hover");
   if (!lua_isnil(lua, -1)) {
     luaL_checktype(lua, -1, LUA_TTABLE);

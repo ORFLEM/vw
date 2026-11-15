@@ -7,16 +7,27 @@ description: Pointer input is per widget; keys go to one handler per surface and
 
 | Field | Called with |
 | --- | --- |
-| `on_click` | `ClickEvent {x, y, button}` — 272 left, 273 right, 274 middle |
+| `on_click` | `ClickEvent {x, y, button}` for any button; `button` is `vw::mouse::left` (272), `right` (273) or `middle` (274), and `left()`, `right()`, `middle()` test it |
+| `on_right_click`, `on_middle_click` | `ClickEvent`: when set, right or middle clicks go here instead of `on_click` |
 | `hover` | `Hover {color, scale, duration}`: a tint and scale animated without rebuilding |
 | `on_hover` | `bool inside` — entering and leaving, even under other widgets; rebuilds afterwards |
 | `on_drag_start`, `on_drag`, `on_drag_end` | `DragEvent {x, y, start_x, start_y, dx, dy, delta_x, delta_y, button, cancelled}` |
 | `on_scroll` | `ScrollEvent {x, y, delta}` — positive scrolls down |
 | `on_scroll_x` | `ScrollEvent` sideways: tilt wheels, touchpads, horizontal swipes; positive scrolls right |
 | `on_touch` | `TouchEvent {phase, id, x, y, start_x, start_y, fingers}` — raw fingers, see [Touch](#touch) |
-| `drag_button` | which button drags (BTN_LEFT, 272) |
+| `drag_button` | which button drags (`vw::mouse::left`) |
 
-The topmost widget under the pointer receives clicks. A drag captures the pointer until release. Handlers usually change your state; the scene rebuilds after every handler runs.
+The topmost widget under the pointer receives clicks. A click is a press and a release of the same button on the same widget; pressing a second button while holding the first cancels it.
+
+```cpp
+ui.rectangle({.width = 32, .height = 32, .input = {
+  .on_click = [&](const vw::ClickEvent&) { player.toggle(); },
+  .on_right_click = [&](const vw::ClickEvent&) { menu_open = true; },
+  .on_middle_click = [&](const vw::ClickEvent&) { player.next(); },
+}});
+```
+
+Or one handler for all of them: `if (click.right()) …`. A drag captures the pointer until release. Handlers usually change your state; the scene rebuilds after every handler runs.
 
 ## Touch
 

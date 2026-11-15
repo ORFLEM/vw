@@ -177,6 +177,7 @@ class WaylandWidget {
   Renderer* renderer_ = nullptr;
   int hovered_ = -1;
   int pressed_ = -1;
+  std::uint32_t pressed_button_ = 0;
   double pointer_x_ = 0;
   double pointer_y_ = 0;
   std::uint32_t width_ = 0;

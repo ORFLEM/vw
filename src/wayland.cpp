@@ -777,7 +777,7 @@ void WaylandWidget::pointer_motion(double x, double y) {
     } else if (under >= 0 && static_cast<std::size_t>(under) < scene_.interactions.size()) {
       const Interaction& interaction = scene_.interactions[static_cast<std::size_t>(under)];
       if (interaction.text_field >= 0) shape = generated::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_TEXT;
-      else if (interaction.on_click || interaction.on_drag_start || interaction.on_drag)
+      else if (interaction.clickable() || interaction.on_drag_start || interaction.on_drag)
         shape = generated::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_POINTER;
     }
     set_cursor(shape);
@@ -909,7 +909,7 @@ void WaylandWidget::touch_down(std::int32_t id, std::uint32_t serial, double x, 
   clipboard_surface = this;
   pointer_inside_ = true;
   pointer_motion(x, y);
-  pointer_button(272, zwayland::generated::WL_POINTER_BUTTON_STATE_PRESSED);  // BTN_LEFT
+  pointer_button(mouse::left, zwayland::generated::WL_POINTER_BUTTON_STATE_PRESSED);
 }
 
 void WaylandWidget::touch_motion(double x, double y) {
@@ -948,7 +948,7 @@ void WaylandWidget::touch_up(bool cancelled) {
     pressed_ = -1;
     text_drag_id_.clear();
   } else if (!touch_scrolling_) {
-    pointer_button(272, zwayland::generated::WL_POINTER_BUTTON_STATE_RELEASED);
+    pointer_button(mouse::left, zwayland::generated::WL_POINTER_BUTTON_STATE_RELEASED);
   }
   touch_scrolling_ = false;
   touch_sideways_ = false;
@@ -1167,10 +1167,16 @@ void WaylandWidget::pointer_button(std::uint32_t button, std::uint32_t state) {
   pointer_motion(pointer_x_, pointer_y_);
   if (state == zwayland::generated::WL_POINTER_BUTTON_STATE_PRESSED) {
     if (dragging_) return;
+    // A second button pressed while one is held cancels the click.
+    if (pressed_ >= 0 && button != pressed_button_) {
+      pressed_ = -1;
+      return;
+    }
     pressed_ = hovered_;
+    pressed_button_ = button;
     if (pressed_ >= 0) {
       const Interaction& interaction = scene_.interactions[static_cast<std::size_t>(pressed_)];
-      if (interaction.text_field >= 0 && button == 272) {  // BTN_LEFT
+      if (interaction.text_field >= 0 && button == mouse::left) {
         text_pointer_press(static_cast<std::size_t>(pressed_));
         return;
       }
@@ -1200,13 +1206,16 @@ void WaylandWidget::pointer_button(std::uint32_t button, std::uint32_t state) {
     return;
   }
   const int activated = pressed_;
+  if (button != pressed_button_) return;
   pressed_ = -1;
   if (activated < 0 || activated != hovered_) return;
   Interaction& interaction = scene_.interactions[static_cast<std::size_t>(activated)];
   // Text fields act on press (text_pointer_press); other buttons do nothing.
   if (interaction.text_field >= 0) return;
-  if (!interaction.on_click) return;
-  const ClickHandler handler = interaction.on_click;
+  ClickHandler handler = interaction.on_click;
+  if (button == mouse::right && interaction.on_right_click) handler = interaction.on_right_click;
+  if (button == mouse::middle && interaction.on_middle_click) handler = interaction.on_middle_click;
+  if (!handler) return;
   invoke(handler, "click", ClickEvent{pointer_x_, pointer_y_, button});
   refresh_scene();
 }

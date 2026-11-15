@@ -145,6 +145,7 @@ const labels: Record<string, string> = {
   'Build and tooling': 'Сборка и инструменты',
   'Views and imports': 'View и импорты',
   'Expressions and handlers': 'Выражения и обработчики',
+  'Passing values and functions': 'Передача значений и функций',
   'Loops, conditions, let': 'Циклы, условия, let',
   'Layout and sizing': 'Раскладка и размеры',
   Elements: 'Элементы',

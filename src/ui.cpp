@@ -273,6 +273,8 @@ Widget Ui::push(std::size_t begin, float width, float height, const Rectangle& s
   interaction.height = height;
   interaction.clip = style.clip;
   interaction.on_click = input.on_click;
+  interaction.on_right_click = input.on_right_click;
+  interaction.on_middle_click = input.on_middle_click;
   interaction.on_drag_start = input.on_drag_start;
   interaction.on_drag = input.on_drag;
   interaction.on_drag_end = input.on_drag_end;
@@ -287,7 +289,7 @@ Widget Ui::push(std::size_t begin, float width, float height, const Rectangle& s
     interaction.has_hover_color = input.hover->color.has_value();
     if (input.hover->color) interaction.hover_color = clamped(*input.hover->color);
   }
-  if (style.visible && (interaction.on_click || interaction.has_hover_color ||
+  if (style.visible && (interaction.clickable() || interaction.has_hover_color ||
                         interaction.hover_scale != 1.0F || interaction.draggable() ||
                         interaction.on_scroll || interaction.on_scroll_x || interaction.on_touch ||
                         interaction.on_hover)) {

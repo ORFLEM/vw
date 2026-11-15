@@ -7,16 +7,27 @@ description: Ввод указателя — у каждого виджета с
 
 | Поле | Вызывается с |
 | --- | --- |
-| `on_click` | `ClickEvent {x, y, button}` — 272 левая, 273 правая, 274 средняя |
+| `on_click` | `ClickEvent {x, y, button}` от любой кнопки; `button` — `vw::mouse::left` (272), `right` (273) или `middle` (274), проверять удобно через `left()`, `right()`, `middle()` |
+| `on_right_click`, `on_middle_click` | `ClickEvent`: если заданы, правые и средние клики идут сюда, а не в `on_click` |
 | `hover` | `Hover {color, scale, duration}`: оттенок и масштаб, анимируемые без пересборки |
 | `on_hover` | `bool inside` — вход и выход, даже под другими виджетами; после этого пересборка |
 | `on_drag_start`, `on_drag`, `on_drag_end` | `DragEvent {x, y, start_x, start_y, dx, dy, delta_x, delta_y, button, cancelled}` |
 | `on_scroll` | `ScrollEvent {x, y, delta}` — положительное значение прокручивает вниз |
 | `on_scroll_x` | `ScrollEvent` вбок: наклон колёсика, тачпады, горизонтальные свайпы; положительное — вправо |
 | `on_touch` | `TouchEvent {phase, id, x, y, start_x, start_y, fingers}` — пальцы как есть, см. [Касания](#касания) |
-| `drag_button` | какая кнопка тянет (BTN_LEFT, 272) |
+| `drag_button` | какая кнопка тянет (`vw::mouse::left`) |
 
-Клики получает самый верхний виджет под указателем. Перетаскивание захватывает указатель до отпускания. Обработчики обычно меняют ваше состояние; сцена пересобирается после каждого обработчика.
+Клики получает самый верхний виджет под указателем. Клик — это нажатие и отпускание одной и той же кнопки на одном виджете; нажатие второй кнопки, пока первая зажата, его отменяет.
+
+```cpp
+ui.rectangle({.width = 32, .height = 32, .input = {
+  .on_click = [&](const vw::ClickEvent&) { player.toggle(); },
+  .on_right_click = [&](const vw::ClickEvent&) { menu_open = true; },
+  .on_middle_click = [&](const vw::ClickEvent&) { player.next(); },
+}});
+```
+
+Или один обработчик на всё: `if (click.right()) …`. Перетаскивание захватывает указатель до отпускания. Обработчики обычно меняют ваше состояние; сцена пересобирается после каждого обработчика.
 
 ## Касания
 

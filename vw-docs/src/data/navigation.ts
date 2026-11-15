@@ -94,6 +94,7 @@ export const tabs: Tab[] = [
       {label: 'Basics', items: [
         {label: 'Views and imports', slug: 'facet/views'},
         {label: 'Expressions and handlers', slug: 'facet/expressions'},
+        {label: 'Passing values and functions', slug: 'facet/data'},
         {label: 'Loops, conditions, let', slug: 'facet/flow'},
       ]},
       {label: 'Layout and motion', items: [

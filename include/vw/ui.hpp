@@ -95,7 +95,12 @@ struct Hover {
 };
 
 struct Input {
+  // Any button: check ClickEvent::button (or left(), right(), middle()).
+  // A press and release of the same button on the widget make a click.
   ClickHandler on_click;
+  // Right and middle clicks, when set, go here instead of on_click.
+  ClickHandler on_right_click;
+  ClickHandler on_middle_click;
   std::optional<Hover> hover;
   DragHandler on_drag_start;
   DragHandler on_drag;
@@ -114,7 +119,7 @@ struct Input {
   // top of it (like QML's HoverHandler). The scene rebuilds afterwards, so
   // handlers can open and close hover popouts by changing state.
   HoverHandler on_hover;
-  std::uint32_t drag_button = 272;  // BTN_LEFT
+  std::uint32_t drag_button = mouse::left;
 };
 
 // A built widget: a range of scene primitives plus its measured size. Layouts

@@ -13,10 +13,22 @@
 
 namespace vw {
 
+// Linux button codes (linux/input-event-codes.h), as ClickEvent::button and
+// DragEvent::button carry them.
+namespace mouse {
+inline constexpr std::uint32_t left = 272;    // BTN_LEFT
+inline constexpr std::uint32_t right = 273;   // BTN_RIGHT
+inline constexpr std::uint32_t middle = 274;  // BTN_MIDDLE
+}  // namespace mouse
+
 struct ClickEvent {
   double x = 0.0;
   double y = 0.0;
   std::uint32_t button = 0;
+
+  bool left() const { return button == mouse::left; }
+  bool right() const { return button == mouse::right; }
+  bool middle() const { return button == mouse::middle; }
 };
 
 struct DragEvent {
@@ -201,6 +213,8 @@ struct Interaction {
   std::array<float, 4> clip{0.0F, 0.0F, 0.0F, 0.0F};
   int text_field = -1;
   ClickHandler on_click;
+  ClickHandler on_right_click;
+  ClickHandler on_middle_click;
   DragHandler on_drag_start;
   DragHandler on_drag;
   DragHandler on_drag_end;
@@ -222,6 +236,7 @@ struct Interaction {
   std::vector<std::array<float, 4>> original_bounds;
 
   bool draggable() const { return on_drag_start || on_drag || on_drag_end; }
+  bool clickable() const { return on_click || on_right_click || on_middle_click; }
 };
 
 struct TextFieldState {
