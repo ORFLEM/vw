@@ -77,12 +77,17 @@ class WaylandWidget {
   // Applies what the input method sent, at its done event.
   void apply_text_input();
   void submit_focused_field();
-  void pointer_axis_horizontal(double horizontal);
+  // `finger`: a touchpad or touchscreen, which scrolls in pixels; a wheel
+  // scrolls in notches of 40.
+  void pointer_axis_horizontal(double horizontal, bool finger = false);
   void touch_down(std::int32_t id, std::uint32_t serial, double x, double y);
   void touch_motion(double x, double y);
   void touch_up(bool cancelled);
   void pointer_button(std::uint32_t button, std::uint32_t state);
-  void pointer_axis(double vertical);
+  void pointer_axis(double vertical, bool finger = false);
+  // Finger scrolling owed to discrete scroll handlers, below one notch.
+  double finger_remainder_ = 0.0;
+  double finger_remainder_x_ = 0.0;
 
  private:
   // Roles (src/roles) present the surface; Role's helpers reach in here.

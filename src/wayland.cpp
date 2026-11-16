@@ -580,6 +580,7 @@ void WaylandWidget::create_pointer() {
     double horizontal = 0.0;
     std::int32_t horizontal_120 = 0;
     bool has_horizontal_120 = false;
+    bool finger = false;
     void enter(client::Proxy&, std::uint32_t serial, client::Proxy* surface, double x, double y) {
       if (surface != nullptr) widget->role_->pointer_enter(surface->id);
       // Every surface of ours shows a cursor, lock surfaces included.
@@ -611,19 +612,19 @@ void WaylandWidget::create_pointer() {
     }
     void axis(client::Proxy& proxy, std::uint32_t, std::uint32_t axis, double value) {
       if (axis == generated::WL_POINTER_AXIS_HORIZONTAL_SCROLL) {
-        if (proxy.version < 5) widget->pointer_axis_horizontal(value);
+        if (proxy.version < 5) widget->pointer_axis_horizontal(value, finger);
         else horizontal += value;
         return;
       }
       if (axis != generated::WL_POINTER_AXIS_VERTICAL_SCROLL) return;
-      if (proxy.version < 5) widget->pointer_axis(value);
+      if (proxy.version < 5) widget->pointer_axis(value, finger);
       else vertical += value;
     }
     void frame(client::Proxy&) {
       if (has_120) widget->pointer_axis(static_cast<double>(vertical_120) / 120.0 * 40.0);
-      else if (vertical != 0.0) widget->pointer_axis(vertical);
+      else if (vertical != 0.0) widget->pointer_axis(vertical, finger);
       if (has_horizontal_120) widget->pointer_axis_horizontal(static_cast<double>(horizontal_120) / 120.0 * 40.0);
-      else if (horizontal != 0.0) widget->pointer_axis_horizontal(horizontal);
+      else if (horizontal != 0.0) widget->pointer_axis_horizontal(horizontal, finger);
       vertical = 0.0;
       vertical_120 = 0;
       has_120 = false;
@@ -631,8 +632,16 @@ void WaylandWidget::create_pointer() {
       horizontal_120 = 0;
       has_horizontal_120 = false;
     }
-    void axis_source(client::Proxy&, std::uint32_t) {}
-    void axis_stop(client::Proxy&, std::uint32_t, std::uint32_t) {}
+    void axis_source(client::Proxy&, std::uint32_t source) {
+      finger = source == generated::WL_POINTER_AXIS_SOURCE_FINGER ||
+               source == generated::WL_POINTER_AXIS_SOURCE_CONTINUOUS;
+    }
+    // Fingers lifted: whatever was short of a notch is dropped, not carried
+    // into the next gesture.
+    void axis_stop(client::Proxy&, std::uint32_t, std::uint32_t axis) {
+      if (axis == generated::WL_POINTER_AXIS_VERTICAL_SCROLL) widget->finger_remainder_ = 0.0;
+      else widget->finger_remainder_x_ = 0.0;
+    }
     void axis_discrete(client::Proxy&, std::uint32_t, std::int32_t) {}
     void axis_value120(client::Proxy&, std::uint32_t axis, std::int32_t value120) {
       if (axis == generated::WL_POINTER_AXIS_VERTICAL_SCROLL) {
@@ -932,8 +941,8 @@ void WaylandWidget::touch_motion(double x, double y) {
     touch_last_y_ = y;
     pointer_x_ = x;
     pointer_y_ = y;
-    if (touch_sideways_) pointer_axis_horizontal(moved);
-    else pointer_axis(moved);
+    if (touch_sideways_) pointer_axis_horizontal(moved, true);
+    else pointer_axis(moved, true);
     return;
   }
   touch_last_x_ = x;
@@ -958,13 +967,31 @@ void WaylandWidget::touch_up(bool cancelled) {
 
 // Sideways scrolling goes only to on_scroll_x handlers: scroll areas and
 // on_scroll are vertical.
-void WaylandWidget::pointer_axis_horizontal(double horizontal) {
+namespace {
+
+// Discrete scroll handlers (switch a tag, step a value) count notches of 40.
+// Fingers send a stream of small pixel deltas: hand them on a notch at a
+// time, so a short swipe is one step and not a burst of them.
+double whole_notches(double& remainder, double delta) {
+  remainder += delta;
+  const double notches = std::trunc(remainder / 40.0);
+  remainder -= notches * 40.0;
+  return notches * 40.0;
+}
+
+}  // namespace
+
+void WaylandWidget::pointer_axis_horizontal(double horizontal, bool finger) {
   if (!pointer_inside_ || horizontal == 0.0 || !std::isfinite(horizontal)) return;
   for (std::size_t index = scene_.interactions.size(); index > 0; --index) {
     const Interaction& interaction = scene_.interactions[index - 1];
     if (!interaction.enabled || !interaction.on_scroll_x ||
         !interaction_contains(interaction, pointer_x_, pointer_y_)) continue;
     const ScrollHandler handler = interaction.on_scroll_x;
+    if (finger) {
+      horizontal = whole_notches(finger_remainder_x_, horizontal);
+      if (horizontal == 0.0) return;
+    }
     invoke(handler, "scroll", ScrollEvent{pointer_x_, pointer_y_, horizontal});
     refresh_scene();
     return;
@@ -1294,7 +1321,7 @@ void WaylandWidget::end_drag(bool cancelled) {
   refresh_scene();
 }
 
-void WaylandWidget::pointer_axis(double vertical) {
+void WaylandWidget::pointer_axis(double vertical, bool finger) {
   if (!pointer_inside_ || vertical == 0.0 || !std::isfinite(vertical)) return;
   // The topmost widget with a scroll handler takes the wheel before scroll areas.
   for (std::size_t index = scene_.interactions.size(); index > 0; --index) {
@@ -1307,6 +1334,10 @@ void WaylandWidget::pointer_axis(double vertical) {
     if (pointer_x_ < interaction.x || pointer_x_ >= interaction.x + interaction.width ||
         pointer_y_ < interaction.y || pointer_y_ >= interaction.y + interaction.height) continue;
     const ScrollHandler handler = interaction.on_scroll;
+    if (finger) {
+      vertical = whole_notches(finger_remainder_, vertical);
+      if (vertical == 0.0) return;
+    }
     invoke(handler, "scroll", ScrollEvent{pointer_x_, pointer_y_, vertical});
     refresh_scene();
     return;
@@ -1316,8 +1347,9 @@ void WaylandWidget::pointer_axis(double vertical) {
     if (pointer_x_ < area->x || pointer_x_ >= area->x + area->width ||
         pointer_y_ < area->y || pointer_y_ >= area->y + area->height) continue;
     const float previous = area->state->offset;
-    area->state->offset = std::clamp(previous +
-        static_cast<float>(vertical * area->step / 40.0), 0.0F, area->maximum);
+    // A wheel notch moves one step; fingers move the content with them.
+    const double moved = finger ? vertical : vertical * area->step / 40.0;
+    area->state->offset = std::clamp(previous + static_cast<float>(moved), 0.0F, area->maximum);
     if (previous != area->state->offset) {
       hovered_ = -1;
       refresh_scene();
