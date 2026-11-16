@@ -12,7 +12,11 @@
 namespace vw::zwwm {
 
 enum class Snapshot : std::uint32_t {
-  status, outputs, toplevels, output_tags, layers, cameras, keyboard, live
+  status, outputs, toplevels, output_tags, layers, cameras, keyboard, live,
+  // Every window with its tag, hidden ones included; zwwm manager version 7.
+  // state bits: 1 mapped, 2 focused, 4 floating, 8 fullscreen, 16 modal,
+  // 32 hidden (on an inactive tag).
+  windows
 };
 
 struct Tag {

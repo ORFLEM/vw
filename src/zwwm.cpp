@@ -105,6 +105,12 @@ struct SnapshotReader {
             ? data["keyboard"] : data).push_back(Json{{"layout", std::string(parser.read_string())},
                             {"group", parser.read_uint()}});
         break;
+      case generated::ZWAYLAND_EXT_ZWWM_SNAPSHOT_V1_EVENT_WINDOW_OPCODE:
+        data.push_back(Json{{"id_hi", parser.read_uint()}, {"id_lo", parser.read_uint()},
+                            {"app_id", std::string(parser.read_string())},
+                            {"title", std::string(parser.read_string())},
+                            {"tag", parser.read_uint()}, {"state", parser.read_uint()}});
+        break;
       case generated::ZWAYLAND_EXT_ZWWM_SNAPSHOT_V1_EVENT_DONE_OPCODE:
         done = true;
         break;
@@ -175,6 +181,8 @@ class Service {
     require_manager();
     if (type == generated::EXT_ZWWM_MANAGER_V1_SNAPSHOT_TYPE_LIVE && manager_->version < 6)
       throw std::runtime_error("zwwm live snapshots require manager version 6");
+    if (type == generated::EXT_ZWWM_MANAGER_V1_SNAPSHOT_TYPE_WINDOWS && manager_->version < 7)
+      throw std::runtime_error("zwwm windows snapshots require manager version 7");
     SnapshotReader result;
     result.type = type;
     if (type == generated::EXT_ZWWM_MANAGER_V1_SNAPSHOT_TYPE_LIVE)
