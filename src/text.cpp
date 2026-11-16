@@ -222,6 +222,12 @@ class TextRenderer {
     if (context_ == nullptr) throw std::runtime_error("could not create Pango context");
     pango_context_set_base_dir(context_, PANGO_DIRECTION_LTR);
     cairo_font_options_set_antialias(font_options_, CAIRO_ANTIALIAS_GRAY);
+    // Letters at their true, fractional advances: hinted metrics and whole-
+    // pixel positions open gaps after narrow glyphs ("Ent er t o") at small
+    // sizes. Slight hinting keeps stems sharp vertically.
+    cairo_font_options_set_hint_metrics(font_options_, CAIRO_HINT_METRICS_OFF);
+    cairo_font_options_set_hint_style(font_options_, CAIRO_HINT_STYLE_SLIGHT);
+    pango_context_set_round_glyph_positions(context_, FALSE);
     pango_cairo_context_set_font_options(context_, font_options_);
     cache_.max_load_factor(1.0F);
     cache_.reserve(max_cache_entries + 16);
