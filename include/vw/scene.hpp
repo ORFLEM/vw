@@ -186,7 +186,10 @@ struct Raster {
   Pixels rgba;
   bool use_tint = true;
   bool alpha_mask = false;
+  // Rounded to the nearest pixel (crisp text). Otherwise drawn at its exact
+  // position when `subpixel`, or at the pixel below it.
   bool pixel_snap = false;
+  bool subpixel = false;
   ImageEffect effect;
   // A closed polygon the image is clipped to: x0, y0, x1, y1, ... from 0 to 1
   // across the drawn image. Empty for none.
@@ -197,7 +200,7 @@ struct Raster {
   bool operator==(const Raster& other) const {
     return carrier == other.carrier && width == other.width && height == other.height &&
            use_tint == other.use_tint && alpha_mask == other.alpha_mask &&
-           pixel_snap == other.pixel_snap && effect == other.effect && mask == other.mask &&
+           pixel_snap == other.pixel_snap && subpixel == other.subpixel && effect == other.effect && mask == other.mask &&
            (rgba == other.rgba || (rgba && other.rgba && *rgba == *other.rgba));
   }
 };

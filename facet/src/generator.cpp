@@ -62,7 +62,7 @@ const std::vector<Element>& elements() {
        {{"text", "text", string}, {"font", "font", string}, {"size", "size", number},
         {"weight", "weight", Type::weight}, {"color", "color", color}, {"max_width", "max_width", number},
         {"max_lines", "max_lines", integer}, {"align", "align", text_align}, {"padding", "place.margin", Type::padding},
-        {"input", "input", input}},
+        {"pixel_snap", "pixel_snap", boolean}, {"input", "input", input}},
        "text", ""},
       {"vw.ui", "Image", Kind::image, "vw::ImageProps",
        {{"path", "path", string}, {"icon", "icon", string}, {"width", "width", number},

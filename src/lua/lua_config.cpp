@@ -484,6 +484,7 @@ int add_text(lua_State* lua) {
   props.max_lines = static_cast<int>(integer_field(lua, 1, "max_lines", 0));
   props.align = string_field(lua, 1, "align", props.align);
   props.ellipsize = string_field(lua, 1, "ellipsize", props.ellipsize);
+  props.pixel_snap = boolean_field(lua, 1, "pixel_snap", true);
   props.radius = number_field(lua, 1, "radius", 0.0F);
   props.place = placement(lua, 1);
   props.input = input(lua, 1);

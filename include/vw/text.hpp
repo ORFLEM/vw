@@ -14,6 +14,7 @@ struct TextOptions {
   int max_lines = 0;
   std::string_view align = "start";
   std::string_view ellipsize = "end";
+  bool pixel_snap = true;
 };
 
 struct CaretStop {

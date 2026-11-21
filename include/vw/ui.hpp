@@ -176,6 +176,10 @@ struct TextProps {
   int max_lines = 0;
   std::string align = "start";      // start, center, end
   std::string ellipsize = "end";    // none, start, middle, end
+  // Whole pixels keep glyphs crisp. Set false for text that moves slowly
+  // (marquees, scrolling tickers): it is then drawn at its exact position
+  // and glides instead of stepping a pixel at a time.
+  bool pixel_snap = true;
   float radius = 0.0F;
   Placement place;
   Input input;

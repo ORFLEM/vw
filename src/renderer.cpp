@@ -540,8 +540,13 @@ Frame Renderer::render(const Scene& scene) const {
       const Rectangle& carrier = scene.rectangles.at(raster.carrier);
       if (!carrier.raster_visible) return;
       vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, state_->raster_pipeline);
-      const float raster_x = raster.pixel_snap ? std::round(carrier.x) : carrier.x;
-      const float raster_y = raster.pixel_snap ? std::round(carrier.y) : carrier.y;
+      // The shader draws at fractional positions; whole ones look as before.
+      const auto position = [&](float value) {
+        if (raster.pixel_snap) return std::round(value);
+        return raster.subpixel ? value : std::floor(value);
+      };
+      const float raster_x = position(carrier.x);
+      const float raster_y = position(carrier.y);
       const RasterPushConstants push{
           {raster_x, raster_y, carrier.width, carrier.height},
           {static_cast<float>(raster_offsets[raster_index]), static_cast<float>(raster.width),
@@ -556,8 +561,8 @@ Frame Renderer::render(const Scene& scene) const {
       vkCmdPushConstants(command, state_->pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                          sizeof(push), &push);
       vkCmdDispatch(command,
-                    (static_cast<std::uint32_t>(std::ceil(carrier.width)) + 7) / 8,
-                    (static_cast<std::uint32_t>(std::ceil(carrier.height)) + 7) / 8, 1);
+                    (static_cast<std::uint32_t>(std::ceil(carrier.width + raster_x - std::floor(raster_x))) + 7) / 8,
+                    (static_cast<std::uint32_t>(std::ceil(carrier.height + raster_y - std::floor(raster_y))) + 7) / 8, 1);
       barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
       barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
       vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,

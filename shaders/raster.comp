@@ -111,12 +111,16 @@ float mask_distance(vec2 point) {
 
 void main() {
   ivec2 local = ivec2(gl_GlobalInvocationID.xy);
-  ivec2 size = ivec2(ceil(raster.bounds.zw));
+  // A fractional position shifts the image within the pixels it covers (one
+  // more column or row); its edges are antialiased by the coverage below.
+  ivec2 start = ivec2(floor(raster.bounds.xy));
+  vec2 shift = raster.bounds.xy - vec2(start);
+  ivec2 size = ivec2(ceil(raster.bounds.zw + shift));
   if (any(greaterThanEqual(local, size))) return;
-  ivec2 destination = ivec2(floor(raster.bounds.xy)) + local;
+  ivec2 destination = start + local;
   if (any(lessThan(destination, ivec2(0))) ||
       any(greaterThanEqual(destination, imageSize(target_image)))) return;
-  vec2 point = vec2(local) + vec2(0.5);
+  vec2 point = vec2(local) + vec2(0.5) - shift;
   vec2 half_size = raster.bounds.zw * 0.5;
   float coverage = 1.0 - smoothstep(-0.5, 0.5,
       rounded_box_distance(point - half_size, half_size, raster.params.x));

@@ -517,7 +517,7 @@ const std::vector<ElementSpec>& elements() {
       {"vw.ui", "Text", Kind::text,
        {{"text", string}, {"font", string}, {"size", number}, {"weight", weight}, {"color", color},
         {"max_width", number}, {"max_lines", integer}, {"align", text_align}, {"padding", padding},
-        {"input", input}}, "text"},
+        {"pixel_snap", boolean}, {"input", input}}, "text"},
       {"vw.ui", "Image", Kind::image,
        {{"path", string}, {"icon", string}, {"width", number}, {"height", number}, {"fit", fit},
         {"radius", number}, {"padding", padding}, {"input", input}}, "path"},
@@ -1014,6 +1014,7 @@ class Builder {
         else if (name == "max_width") p.max_width = f();
         else if (name == "max_lines") p.max_lines = static_cast<int>(value.number());
         else if (name == "align") p.align = value.text();
+        else if (name == "pixel_snap") p.pixel_snap = value.boolean();
         else if (name == "padding") p.place.margin = margin_of(value);
         else if (name == "input") p.input = make_input(value);
         return;

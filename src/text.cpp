@@ -529,7 +529,8 @@ std::pair<float, float> add_text(Scene& scene, std::string_view text,
     raster.height = bitmap->height;
     raster.rgba = bitmap->pixels;
     raster.use_tint = raster.alpha_mask = bitmap->alpha_mask;
-    raster.pixel_snap = true;
+    raster.pixel_snap = options.pixel_snap;
+    raster.subpixel = !options.pixel_snap;
     scene.rasters.push_back(std::move(raster));
   } else {
     const std::size_t count = static_cast<std::size_t>(visible_width) * visible_height;
@@ -550,7 +551,8 @@ std::pair<float, float> add_text(Scene& scene, std::string_view text,
     raster.height = visible_height;
     raster.rgba = std::make_shared<const std::vector<std::uint32_t>>(std::move(pixels));
     raster.use_tint = raster.alpha_mask = bitmap->alpha_mask;
-    raster.pixel_snap = true;
+    raster.pixel_snap = options.pixel_snap;
+    raster.subpixel = !options.pixel_snap;
     scene.rasters.push_back(std::move(raster));
   }
   return {bitmap->metrics.width, bitmap->metrics.bottom - bitmap->metrics.top};

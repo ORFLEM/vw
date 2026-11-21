@@ -354,7 +354,7 @@ Widget Ui::text(const TextProps& props) {
   style.color2 = style.color;
   style.raster_visible = style.visible;
   const std::size_t begin = scene_.rectangles.size();
-  const TextOptions options{props.max_width, props.max_lines, props.align, props.ellipsize};
+  const TextOptions options{props.max_width, props.max_lines, props.align, props.ellipsize, props.pixel_snap};
   const auto [width, height] =
       add_text(scene_, props.text, props.font, props.size, props.weight, style, options);
   return push(begin, width, height, style, props.input);
