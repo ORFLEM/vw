@@ -154,6 +154,11 @@ struct Rectangle {
 // a scene full of cached text and images costs no pixel copies.
 using Pixels = std::shared_ptr<const std::vector<std::uint32_t>>;
 
+// Text that may sit between pixels (TextProps::pixel_snap = false): the
+// renderer draws it from a copy rasterized at its fractional offset.
+struct ShiftedText;
+bool operator==(const ShiftedText& a, const ShiftedText& b);
+
 // Image pixels held in memory, such as a screen capture: width * height
 // values, row by row, each RGBA with red in the low byte.
 struct Bitmap {
@@ -186,10 +191,9 @@ struct Raster {
   Pixels rgba;
   bool use_tint = true;
   bool alpha_mask = false;
-  // Rounded to the nearest pixel (crisp text). Otherwise drawn at its exact
-  // position when `subpixel`, or at the pixel below it.
+  // Rounded to the nearest pixel (text); otherwise the pixel below it.
   bool pixel_snap = false;
-  bool subpixel = false;
+  std::shared_ptr<const ShiftedText> shifted;
   ImageEffect effect;
   // A closed polygon the image is clipped to: x0, y0, x1, y1, ... from 0 to 1
   // across the drawn image. Empty for none.
@@ -200,7 +204,8 @@ struct Raster {
   bool operator==(const Raster& other) const {
     return carrier == other.carrier && width == other.width && height == other.height &&
            use_tint == other.use_tint && alpha_mask == other.alpha_mask &&
-           pixel_snap == other.pixel_snap && subpixel == other.subpixel && effect == other.effect && mask == other.mask &&
+           pixel_snap == other.pixel_snap &&
+           (shifted == other.shifted || (shifted && other.shifted && *shifted == *other.shifted)) && effect == other.effect && mask == other.mask &&
            (rgba == other.rgba || (rgba && other.rgba && *rgba == *other.rgba));
   }
 };

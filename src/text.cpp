@@ -56,6 +56,11 @@ struct TextKey {
   int max_lines = 0;
   TextAlign align = TextAlign::start;
   TextEllipsize ellipsize = TextEllipsize::end;
+  // Drawn this many quarter pixels right and down, on a bitmap one pixel
+  // larger each way (padded), for text placed between pixels.
+  std::uint8_t shift_x = 0;
+  std::uint8_t shift_y = 0;
+  bool padded = false;
 
   bool operator==(const TextKey&) const = default;
 };
@@ -76,6 +81,8 @@ struct TextKeyHash {
     hash_combine(seed, static_cast<std::size_t>(key.max_lines));
     hash_combine(seed, static_cast<std::size_t>(key.align));
     hash_combine(seed, static_cast<std::size_t>(key.ellipsize));
+    hash_combine(seed, static_cast<std::size_t>(key.shift_x) | (static_cast<std::size_t>(key.shift_y) << 8U) |
+                           (static_cast<std::size_t>(key.padded) << 16U));
     return seed;
   }
 };
@@ -255,7 +262,7 @@ class TextRenderer {
     }
 
     PangoLayout* layout = build_layout(key, size, max_width);
-    auto bitmap = rasterize(layout, color, key.color_rgb == 0U);
+    auto bitmap = rasterize(layout, color, key.color_rgb == 0U, key.shift_x, key.shift_y, key.padded);
     g_object_unref(layout);
 
     lru_.push_front(key);
@@ -341,7 +348,8 @@ class TextRenderer {
 
   std::shared_ptr<TextBitmap> rasterize(PangoLayout* layout,
                                          const std::array<float, 4>& color,
-                                         bool alpha_mask) const {
+                                         bool alpha_mask, int shift_x = 0, int shift_y = 0,
+                                         bool padded = false) const {
     PangoRectangle ink{};
     PangoRectangle logical{};
     pango_layout_get_extents(layout, &ink, &logical);
@@ -354,10 +362,11 @@ class TextRenderer {
     const int extra_top = ceil_pixels(logical.y - ink.y);
     const int extra_bottom = ceil_pixels(
         ink.y + ink.height - logical.y - logical.height);
+    const int pad = padded ? 1 : 0;
     const int width = std::max(
-        1, ceil_pixels(logical.width) + extra_left + extra_right);
+        1, ceil_pixels(logical.width) + extra_left + extra_right) + pad;
     const int height = std::max(
-        1, ceil_pixels(logical.height) + extra_top + extra_bottom);
+        1, ceil_pixels(logical.height) + extra_top + extra_bottom) + pad;
     const int baseline = pango_layout_get_baseline(layout) / PANGO_SCALE + extra_top;
     const TextMetrics metrics = measure(layout);
 
@@ -389,8 +398,8 @@ class TextRenderer {
       pango_layout_iter_get_line_extents(iter, nullptr, &line_logical);
       const int line_left = line_logical.x / PANGO_SCALE;
       const int line_baseline = pango_layout_iter_get_baseline(iter) / PANGO_SCALE;
-      cairo_move_to(cairo, line_left - block_left + extra_left,
-                    line_baseline + extra_top);
+      cairo_move_to(cairo, line_left - block_left + extra_left + shift_x * 0.25,
+                    line_baseline + extra_top + shift_y * 0.25);
       pango_cairo_show_layout_line(cairo,
                                    pango_layout_iter_get_line_readonly(iter));
     } while (pango_layout_iter_next_line(iter));
@@ -455,7 +464,48 @@ TextRenderer& text_renderer() {
   return renderer;
 }
 
+// The part of a bitmap from (clip_x, clip_y) on: ink left of or above the
+// surface is cut off rather than drawn at a negative position.
+Pixels crop(const TextBitmap& bitmap, std::uint32_t clip_x, std::uint32_t clip_y) {
+  if (clip_x == 0 && clip_y == 0) return bitmap.pixels;
+  const std::uint32_t visible_width = bitmap.width - clip_x;
+  const std::uint32_t visible_height = bitmap.height - clip_y;
+  const std::size_t count = static_cast<std::size_t>(visible_width) * visible_height;
+  std::vector<std::uint32_t> pixels(bitmap.alpha_mask ? (count + 3U) / 4U : count);
+  for (std::uint32_t y = 0; y < visible_height; ++y) {
+    for (std::uint32_t x = 0; x < visible_width; ++x) {
+      const std::size_t src = static_cast<std::size_t>(y + clip_y) * bitmap.width + x + clip_x;
+      const std::size_t dst = static_cast<std::size_t>(y) * visible_width + x;
+      if (bitmap.alpha_mask) {
+        const auto alpha = ((*bitmap.pixels)[src / 4U] >> ((src & 3U) * 8U)) & 255U;
+        pixels[dst / 4U] |= alpha << ((dst & 3U) * 8U);
+      } else pixels[dst] = (*bitmap.pixels)[src];
+    }
+  }
+  return std::make_shared<const std::vector<std::uint32_t>>(std::move(pixels));
+}
+
 }  // namespace
+
+struct ShiftedText {
+  TextKey key;
+  float size = 0.0F;
+  float max_width = 0.0F;
+  std::array<float, 4> color{};
+  std::uint32_t clip_x = 0;
+  std::uint32_t clip_y = 0;
+};
+
+bool operator==(const ShiftedText& a, const ShiftedText& b) {
+  return a.key == b.key && a.clip_x == b.clip_x && a.clip_y == b.clip_y && a.color == b.color;
+}
+
+Pixels shifted_text(const ShiftedText& text, int quarter_x, int quarter_y) {
+  TextKey key = text.key;
+  key.shift_x = static_cast<std::uint8_t>(quarter_x);
+  key.shift_y = static_cast<std::uint8_t>(quarter_y);
+  return crop(*text_renderer().render(key, text.size, text.max_width, text.color), text.clip_x, text.clip_y);
+}
 
 std::vector<CaretStop> caret_stops(std::string_view text, std::string_view font, float size,
                                    int weight) {
@@ -492,6 +542,7 @@ std::pair<float, float> add_text(Scene& scene, std::string_view text,
   key.max_lines = options.max_lines;
   key.align = parse_align(options.align);
   key.ellipsize = parse_ellipsize(options.ellipsize);
+  key.padded = !options.pixel_snap;
 
   const auto bitmap = text_renderer().render(
       key, size, options.max_width, style.color);
@@ -522,39 +573,24 @@ std::pair<float, float> add_text(Scene& scene, std::string_view text,
       : std::array<float, 4>{1.0F, 1.0F, 1.0F, style.color[3]};
   const std::size_t carrier_index = scene.rectangles.size();
   scene.add(carrier);
-  if (clip_x == 0 && clip_y == 0) {
-    Raster raster;
-    raster.carrier = carrier_index;
-    raster.width = bitmap->width;
-    raster.height = bitmap->height;
-    raster.rgba = bitmap->pixels;
-    raster.use_tint = raster.alpha_mask = bitmap->alpha_mask;
-    raster.pixel_snap = options.pixel_snap;
-    raster.subpixel = !options.pixel_snap;
-    scene.rasters.push_back(std::move(raster));
-  } else {
-    const std::size_t count = static_cast<std::size_t>(visible_width) * visible_height;
-    std::vector<std::uint32_t> pixels(bitmap->alpha_mask ? (count + 3U) / 4U : count);
-    for (std::uint32_t y = 0; y < visible_height; ++y) {
-      for (std::uint32_t x = 0; x < visible_width; ++x) {
-        const std::size_t src = static_cast<std::size_t>(y + clip_y) * bitmap->width + x + clip_x;
-        const std::size_t dst = static_cast<std::size_t>(y) * visible_width + x;
-        if (bitmap->alpha_mask) {
-          const auto alpha = ((*bitmap->pixels)[src / 4U] >> ((src & 3U) * 8U)) & 255U;
-          pixels[dst / 4U] |= alpha << ((dst & 3U) * 8U);
-        } else pixels[dst] = (*bitmap->pixels)[src];
-      }
-    }
-    Raster raster;
-    raster.carrier = carrier_index;
-    raster.width = visible_width;
-    raster.height = visible_height;
-    raster.rgba = std::make_shared<const std::vector<std::uint32_t>>(std::move(pixels));
-    raster.use_tint = raster.alpha_mask = bitmap->alpha_mask;
-    raster.pixel_snap = options.pixel_snap;
-    raster.subpixel = !options.pixel_snap;
-    scene.rasters.push_back(std::move(raster));
+  Raster raster;
+  raster.carrier = carrier_index;
+  raster.width = visible_width;
+  raster.height = visible_height;
+  raster.rgba = crop(*bitmap, clip_x, clip_y);
+  raster.use_tint = raster.alpha_mask = bitmap->alpha_mask;
+  raster.pixel_snap = true;
+  if (!options.pixel_snap) {
+    auto shifted = std::make_shared<ShiftedText>();
+    shifted->key = key;
+    shifted->size = size;
+    shifted->max_width = options.max_width;
+    shifted->color = style.color;
+    shifted->clip_x = clip_x;
+    shifted->clip_y = clip_y;
+    raster.shifted = std::move(shifted);
   }
+  scene.rasters.push_back(std::move(raster));
   return {bitmap->metrics.width, bitmap->metrics.bottom - bitmap->metrics.top};
 }
 

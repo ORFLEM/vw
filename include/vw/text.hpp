@@ -32,4 +32,8 @@ std::pair<float, float> add_text(Scene& scene, std::string_view text,
                                  const Rectangle& style,
                                  const TextOptions& options = {});
 
+// A copy of shifted text drawn quarter_x and quarter_y quarters of a pixel
+// right and down (0..3), the size of the raster that carries it.
+Pixels shifted_text(const ShiftedText& text, int quarter_x, int quarter_y);
+
 }  // namespace vw

@@ -1,4 +1,5 @@
 #include "vw/renderer.hpp"
+#include "vw/text.hpp"
 
 #include <vulkan/vulkan.h>
 
@@ -426,9 +427,35 @@ Frame Renderer::render(const Scene& scene) const {
       check(vkCreateImageView(state_->device, &view, nullptr, &backdrop_view), "vkCreateImageView(backdrop)");
     }
 
+    // Where each raster lands, in whole pixels, and the pixels it shows there:
+    // text between pixels uses its copy rasterized at that offset.
+    std::vector<std::array<float, 2>> raster_positions(scene.rasters.size());
+    std::vector<Pixels> raster_sources(scene.rasters.size());
+    for (std::size_t index = 0; index < scene.rasters.size(); ++index) {
+      const Raster& raster = scene.rasters[index];
+      const Rectangle& carrier = scene.rectangles.at(raster.carrier);
+      raster_sources[index] = raster.rgba;
+      if (raster.shifted) {
+        const auto place = [](float value, int& quarter) {
+          const float whole = std::floor(value);
+          quarter = static_cast<int>(std::lround((value - whole) * 4.0F));
+          if (quarter == 4) return quarter = 0, whole + 1.0F;
+          return whole;
+        };
+        int quarter_x = 0;
+        int quarter_y = 0;
+        raster_positions[index] = {place(carrier.x, quarter_x), place(carrier.y, quarter_y)};
+        if (quarter_x != 0 || quarter_y != 0)
+          raster_sources[index] = shifted_text(*raster.shifted, quarter_x, quarter_y);
+      } else if (raster.pixel_snap) {
+        raster_positions[index] = {std::round(carrier.x), std::round(carrier.y)};
+      } else {
+        raster_positions[index] = {carrier.x, carrier.y};
+      }
+    }
     std::vector<std::uint32_t> raster_pixels;
-    for (const Raster& raster : scene.rasters)
-      if (raster.rgba) raster_pixels.insert(raster_pixels.end(), raster.rgba->begin(), raster.rgba->end());
+    for (const Pixels& pixels : raster_sources)
+      if (pixels) raster_pixels.insert(raster_pixels.end(), pixels->begin(), pixels->end());
     // Custom shader data follows the pixels in the same buffer; the shader
     // finds it through clip_params.y (offset) and .z (count).
     std::vector<std::uint32_t> data_offsets(scene.rectangles.size(), 0);
@@ -531,7 +558,7 @@ Frame Renderer::render(const Scene& scene) const {
       std::uint32_t offset = 0;
       for (std::size_t raster_index = 0; raster_index < scene.rasters.size(); ++raster_index) {
         raster_offsets[raster_index] = offset;
-        offset += static_cast<std::uint32_t>(scene.rasters[raster_index].size());
+        offset += static_cast<std::uint32_t>(raster_sources[raster_index] ? raster_sources[raster_index]->size() : 0);
         carried.at(scene.rasters[raster_index].carrier).push_back(raster_index);
       }
     }
@@ -540,13 +567,7 @@ Frame Renderer::render(const Scene& scene) const {
       const Rectangle& carrier = scene.rectangles.at(raster.carrier);
       if (!carrier.raster_visible) return;
       vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, state_->raster_pipeline);
-      // The shader draws at fractional positions; whole ones look as before.
-      const auto position = [&](float value) {
-        if (raster.pixel_snap) return std::round(value);
-        return raster.subpixel ? value : std::floor(value);
-      };
-      const float raster_x = position(carrier.x);
-      const float raster_y = position(carrier.y);
+      const auto [raster_x, raster_y] = raster_positions[raster_index];
       const RasterPushConstants push{
           {raster_x, raster_y, carrier.width, carrier.height},
           {static_cast<float>(raster_offsets[raster_index]), static_cast<float>(raster.width),
@@ -561,8 +582,8 @@ Frame Renderer::render(const Scene& scene) const {
       vkCmdPushConstants(command, state_->pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                          sizeof(push), &push);
       vkCmdDispatch(command,
-                    (static_cast<std::uint32_t>(std::ceil(carrier.width + raster_x - std::floor(raster_x))) + 7) / 8,
-                    (static_cast<std::uint32_t>(std::ceil(carrier.height + raster_y - std::floor(raster_y))) + 7) / 8, 1);
+                    (static_cast<std::uint32_t>(std::ceil(carrier.width)) + 7) / 8,
+                    (static_cast<std::uint32_t>(std::ceil(carrier.height)) + 7) / 8, 1);
       barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
       barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
       vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
