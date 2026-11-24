@@ -1242,6 +1242,7 @@ class Builder {
         vw::SurfaceProps props;
         Value values = configure(*spec, node, scope, &props, main);
         if (node.children.empty()) evaluator_.error(node.at, "a Surface needs content");
+        facet::use_output(props.output);
         {
           const Named<vw::SurfaceProps> declared(props);
           declare(node, scope, declared.x, declared.y, declared.width, declared.height, values);

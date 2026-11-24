@@ -53,6 +53,12 @@ struct Screen {
   float refresh = 0;  // Hz
 };
 
+// Surface(output: "DP-1"): `screen` inside it is that monitor.
+inline void use_output(const std::string& name) {
+  if (name.empty()) return;
+  if (auto output = vw::output(name)) vw::set_current_output(std::move(*output));
+}
+
 inline Screen screen() {
   const vw::Output output = vw::current_output();
   return {output.name, output.description, static_cast<float>(output.x), static_cast<float>(output.y),

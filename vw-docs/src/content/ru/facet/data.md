@@ -65,6 +65,40 @@ inline int volume_percent = 40;
 
 Короткие помощники можно держать и в самом файле, в [блоке `cpp { }`](/ru/facet/cpp/#блоки-c).
 
+### Из библиотеки
+
+Библиотека — это заголовок плюс то, что нужно слинковать. Подключите заголовок через `include`, вызывайте как обычную функцию и слинкуйте в CMake:
+
+```facet
+include <libnotify/notify.h>
+include "mpris.hpp"
+
+view Player(state) {
+    ui.Text(text: mpris::title(state.player))
+    ui.Rectangle(width: 24, height: 24, input: {
+        on_click: () => notify_notification_show(state.toast, nullptr)
+    })
+}
+```
+
+```cmake
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(NOTIFY REQUIRED IMPORTED_TARGET libnotify)
+target_link_libraries(my-widget PRIVATE vw::vw PkgConfig::NOTIFY)
+```
+
+Пространства имён — как в C++: `mpris::title`, а не `mpris.title`. Вызовы, которым нужна подготовка (`notify_init`), или длинные — в ваш C++ или в [блок `cpp { }`](/ru/facet/cpp/#блоки-c), а view вызывает вашу обёртку. Плагин не может вызвать библиотеку напрямую: оберните вызов в функцию и передайте её через `set()`.
+
+### Функции vw
+
+Функции `vw::` работают так же: `vw::spawn({"pavucontrol"})`, `vw::outputs().size()`. Большинство из них — функции, им нужны `()`: `vw::current_output().width`, а не `vw::current_output::width`. Для монитора, на котором рисуется view, короче `screen` — это то же самое:
+
+```facet
+ui.Text(text: state.vars.get_bat_str(screen.width >= 2560))
+```
+
+`screen` — свой монитор панели при [`App::per_output`](/ru/guides/shells/#панель-на-каждый-монитор) или тот, что указан в `Surface(output: "DP-1")`. Иначе — первый монитор.
+
 ### Из одного view в другой
 
 View, который не является поверхностью, возвращает `vw::Widget`. Чтобы вставить его в другой view, зарегистрируйте его как [нативный виджет или компонент](/ru/facet/cpp/#нативные-виджеты) и передайте нужное аргументами.

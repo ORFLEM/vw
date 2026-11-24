@@ -31,6 +31,7 @@ class App::Surface : public SceneSource {
     begin_animation_frame();
     Scene scene;
     Ui ui(scene);
+    struct Reset { ~Reset() { set_current_output(std::nullopt); } } reset;
     build_(ui);
     if (scene.rectangles.empty() && !scene.toplevel && !scene.session_lock) {
       scene.mapped = false;

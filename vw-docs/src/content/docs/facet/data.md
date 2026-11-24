@@ -65,6 +65,40 @@ inline int volume_percent = 40;
 
 Short helpers can also live in the file itself, in a [`cpp { }` block](/facet/cpp/#c-blocks).
 
+### From a library
+
+A library is a header plus something to link. `include` its header, call it like any function, and link it in CMake:
+
+```facet
+include <libnotify/notify.h>
+include "mpris.hpp"
+
+view Player(state) {
+    ui.Text(text: mpris::title(state.player))
+    ui.Rectangle(width: 24, height: 24, input: {
+        on_click: () => notify_notification_show(state.toast, nullptr)
+    })
+}
+```
+
+```cmake
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(NOTIFY REQUIRED IMPORTED_TARGET libnotify)
+target_link_libraries(my-widget PRIVATE vw::vw PkgConfig::NOTIFY)
+```
+
+Namespaces are C++: write `mpris::title`, not `mpris.title`. Calls that need setup (`notify_init`), or that are long, belong in your C++ or in a [`cpp { }` block](/facet/cpp/#c-blocks); the view then calls your wrapper. A plugin cannot call a library directly: wrap the call in a function and hand it over with `set()`.
+
+### vw's own functions
+
+`vw::` functions work the same way: `vw::spawn({"pavucontrol"})`, `vw::outputs().size()`. Most are functions, so they need `()`: `vw::current_output().width`, never `vw::current_output::width`. For the monitor being drawn on, `screen` is shorter and is the same thing:
+
+```facet
+ui.Text(text: state.vars.get_bat_str(screen.width >= 2560))
+```
+
+`screen` is the bar's own monitor with [`App::per_output`](/guides/shells/#one-bar-per-monitor), or the one in `Surface(output: "DP-1")`. Otherwise it is the first monitor.
+
 ### From one view to another
 
 A view that is not a surface returns a `vw::Widget`. To place it inside another view, register it as a [native widget or component](/facet/cpp/#native-widgets) and pass what it needs as arguments.

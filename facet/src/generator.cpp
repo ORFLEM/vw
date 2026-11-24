@@ -560,6 +560,7 @@ class Generator {
     switch (spec.kind) {
       case Kind::surface: {
         if (node.children.empty()) throw Error(node.at, "a Surface needs content");
+        if (argument(node, "output")) line(node.at, std::format("facet::use_output({}.output);", props));
         boxes_.push_back({argument(node, "width") ? std::optional(std::format("*{}.width", props)) : std::nullopt,
                           argument(node, "height") ? std::optional(std::format("*{}.height", props)) : std::nullopt});
         const std::string children = block(node.children);
