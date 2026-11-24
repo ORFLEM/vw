@@ -10,11 +10,18 @@ void Scene::add(Rectangle rectangle) {
   if (!std::isfinite(rectangle.x) || !std::isfinite(rectangle.y) ||
       !std::isfinite(rectangle.width) || !std::isfinite(rectangle.height) ||
       !std::isfinite(rectangle.radius) || !std::isfinite(rectangle.border_width) ||
-      rectangle.width <= 0.0F || rectangle.height <= 0.0F ||
       rectangle.radius < 0.0F || rectangle.border_width < 0.0F) {
     // Positions may be negative: the shaders clip to the surface, so
     // widgets can slide in from past an edge.
-    throw std::invalid_argument("rectangle geometry must be finite, with positive size");
+    throw std::invalid_argument("rectangle geometry must be finite");
+  }
+  // A popup growing from nothing (or a spring overshooting past it) passes
+  // through zero and below: it takes up no room and draws nothing.
+  rectangle.width = std::max(0.0F, rectangle.width);
+  rectangle.height = std::max(0.0F, rectangle.height);
+  if (rectangle.width == 0.0F || rectangle.height == 0.0F) {
+    rectangle.visible = false;
+    rectangle.raster_visible = false;
   }
   rectangle.radius = std::min(rectangle.radius,
                                std::min(rectangle.width, rectangle.height) * 0.5F);

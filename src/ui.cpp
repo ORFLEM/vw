@@ -38,8 +38,15 @@ void apply_clip(const Placement& place, Rectangle& style) {
   if (!place.clip) return;
   const Clip& clip = *place.clip;
   if (!std::isfinite(clip.x) || !std::isfinite(clip.y) || !std::isfinite(clip.width) ||
-      !std::isfinite(clip.height) || clip.width <= 0.0F || clip.height <= 0.0F)
-    throw std::invalid_argument("clip requires finite coordinates and positive dimensions");
+      !std::isfinite(clip.height))
+    throw std::invalid_argument("clip requires finite values");
+  // An empty clip shows nothing (a zero-sized one would otherwise mean none).
+  if (clip.width <= 0.0F || clip.height <= 0.0F) {
+    style.visible = false;
+    style.raster_visible = false;
+    style.clipped_out = true;
+    return;
+  }
   style.clip = {clip.x, clip.y, clip.width, clip.height};
   style.clip_radius = clip.radius;
 }
@@ -115,6 +122,13 @@ std::array<float, 4> intersect_clip(const std::array<float, 4>& previous,
 // not flip between square and rounded corners. An empty result hides the
 // primitive: a zero-sized clip would otherwise mean no clip at all.
 void combine_clip(Rectangle& rectangle, const std::array<float, 4>& parent, float parent_radius) {
+  // A parent with no area (a popup opening from zero) hides what is in it.
+  if (parent[2] <= 0.0F || parent[3] <= 0.0F) {
+    rectangle.visible = false;
+    rectangle.raster_visible = false;
+    rectangle.clipped_out = true;
+    return;
+  }
   if (rectangle.clip[2] <= 0.0F || rectangle.clip[3] <= 0.0F) {
     rectangle.clip = parent;
     rectangle.clip_radius = parent_radius;
@@ -250,9 +264,11 @@ std::string canvas_source(const CanvasProps& props) {
 }
 
 std::uint32_t surface_dimension(float value, const char* what) {
-  if (!std::isfinite(value) || value < 1.0F || value > 8192.0F)
-    throw std::invalid_argument(std::string(what) + " dimensions must be between 1 and 8192");
-  return static_cast<std::uint32_t>(std::ceil(value));
+  if (!std::isfinite(value) || value > 8192.0F)
+    throw std::invalid_argument(std::string(what) + " dimensions must be finite and at most 8192");
+  // A surface is at least one pixel: what is smaller (an opening popup)
+  // gets that pixel, transparent unless something is drawn in it.
+  return static_cast<std::uint32_t>(std::max(1.0F, std::ceil(value)));
 }
 
 }  // namespace
@@ -814,11 +830,13 @@ Widget Ui::finish_scroll(const Rectangle& style, std::size_t begin, float conten
 }
 
 Widget Ui::scrollbox(std::span<const Widget> children, const ScrollProps& props) {
-  if (props.width <= 0.0F || props.height <= 0.0F)
-    throw std::invalid_argument("scrollbox requires positive width and height");
+  if (!std::isfinite(props.width) || !std::isfinite(props.height))
+    throw std::invalid_argument("scrollbox width and height must be finite");
   if (props.gap < 0.0F || props.padding < 0.0F)
     throw std::invalid_argument("scroll gap and padding must be non-negative");
-  const Rectangle style = scroll_style(props.place, props.width, props.height, props.radius);
+  // Zero (or less) shows nothing, for popups opening from nothing.
+  const Rectangle style = scroll_style(props.place, std::max(0.0F, props.width),
+                                       std::max(0.0F, props.height), props.radius);
   const auto state = scroll_state(props.id);
   float content_height = props.padding * 2.0F;
   for (const Widget& child : children) content_height += child.height + child.margin[0] + child.margin[2];
@@ -835,12 +853,13 @@ Widget Ui::scrollbox(std::span<const Widget> children, const ScrollProps& props)
 }
 
 Widget Ui::listview(const ListviewProps& props) {
-  if (props.width <= 0 || props.height <= 0 || props.gap < 0 ||
+  if (!std::isfinite(props.width) || !std::isfinite(props.height) || props.gap < 0 ||
       (props.item_height <= 0 && !props.row_height))
     throw std::invalid_argument(
-        "listview requires positive width, height, item_height (or row_height) and non-negative gap");
+        "listview requires finite width and height, positive item_height (or row_height) and non-negative gap");
   if (!props.render) throw std::invalid_argument("listview requires a render function");
-  const Rectangle style = scroll_style(props.place, props.width, props.height, props.radius);
+  const Rectangle style = scroll_style(props.place, std::max(0.0F, props.width),
+                                       std::max(0.0F, props.height), props.radius);
   const auto state = scroll_state(props.id);
   const std::size_t count = props.count;
   // Row tops; fixed heights need no table.
@@ -868,9 +887,9 @@ Widget Ui::listview(const ListviewProps& props) {
     state->kept = props.keep_visible;
     const std::size_t index = *props.keep_visible;
     if (top(index) < state->offset) state->offset = top(index);
-    else if (bottom(index) > state->offset + props.height) state->offset = bottom(index) - props.height;
+    else if (bottom(index) > state->offset + style.height) state->offset = bottom(index) - style.height;
   }
-  state->offset = std::clamp(state->offset, 0.0F, std::max(0.0F, content_height - props.height));
+  state->offset = std::clamp(state->offset, 0.0F, std::max(0.0F, content_height - style.height));
   // First and one-past-last rows that intersect the viewport.
   std::size_t first = 0;
   std::size_t last = 0;
@@ -878,10 +897,10 @@ Widget Ui::listview(const ListviewProps& props) {
     first = static_cast<std::size_t>(std::upper_bound(tops.begin(), tops.end() - 1, state->offset) - tops.begin());
     first = first > 0 ? first - 1 : 0;
     last = first;
-    while (last < count && top(last) < state->offset + props.height) ++last;
+    while (last < count && top(last) < state->offset + style.height) ++last;
   } else {
     first = std::min(count, static_cast<std::size_t>(state->offset / stride));
-    last = std::min(count, static_cast<std::size_t>(std::ceil((state->offset + props.height) / stride)) + 1);
+    last = std::min(count, static_cast<std::size_t>(std::ceil((state->offset + style.height) / stride)) + 1);
   }
   std::size_t begin = scene_.rectangles.size();
   for (std::size_t index = first; index < last; ++index) {
@@ -897,10 +916,10 @@ float scroll_offset(std::string_view id) { return scroll_state(std::string(id))-
 void set_scroll_offset(std::string_view id, float offset) { scroll_state(std::string(id))->offset = offset; }
 
 Widget Ui::anchor_layout(const AnchorLayoutProps& props) {
-  const float width = props.width;
-  const float height = props.height;
-  if (!std::isfinite(width) || !std::isfinite(height) || width <= 0 || height <= 0)
-    throw std::invalid_argument("anchor_layout needs positive finite width and height");
+  if (!std::isfinite(props.width) || !std::isfinite(props.height))
+    throw std::invalid_argument("anchor_layout needs finite width and height");
+  const float width = std::max(0.0F, props.width);
+  const float height = std::max(0.0F, props.height);
   const Rectangle style = scroll_style(props.place, width, height, props.radius);
   const std::size_t begin = scene_.rectangles.size();
   for (const AnchorChild& child : props.children) {
