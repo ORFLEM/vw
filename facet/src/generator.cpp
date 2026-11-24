@@ -977,6 +977,38 @@ class Generator {
   }
 
   // --- expressions ----------------------------------------------------------
+  // Resolve an imported module alias only when the expression begins with
+  // that alias. Locals and view parameters take precedence, so ordinary
+  // object access such as `state.player.title` remains unchanged.
+  std::optional<std::string> qualified_name(const Expr& value) const {
+    using K = Expr::Kind;
+
+    if (value.kind == K::identifier) {
+      if (local(value.text) || parameter(value.text)) return std::nullopt;
+
+      const auto found = modules_.find(value.text);
+      if (found == modules_.end()) return std::nullopt;
+
+      std::string result;
+      std::size_t start = 0;
+      while (start < found->second.size()) {
+        const std::size_t end = found->second.find('.', start);
+        if (!result.empty()) result += "::";
+        result += found->second.substr(
+            start, end == std::string::npos ? std::string::npos : end - start);
+        if (end == std::string::npos) break;
+        start = end + 1;
+      }
+      return result;
+    }
+
+    if (value.kind == K::member) {
+      if (auto parent = qualified_name(*value.operands[0]))
+        return *parent + "::" + value.text;
+    }
+    return std::nullopt;
+  }
+
   std::string expression(const Expr& value) {
     using K = Expr::Kind;
     switch (value.kind) {
@@ -1000,6 +1032,7 @@ class Generator {
           }
         return value.text;
       case K::member:
+        if (auto qualified = qualified_name(value)) return *qualified;
         if (value.text == "length") return std::format("std::size({})", expression(*value.operands[0]));
         return std::format("{}.{}", expression(*value.operands[0]), value.text);
       case K::index:
