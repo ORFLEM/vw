@@ -17,6 +17,7 @@
   freetype,
   harfbuzz,
   libxkbcommon,
+  libxml2,
   lua5_4,
   nlohmann_json,
   pam,
@@ -37,7 +38,8 @@ clangStdenv.mkDerivation {
 
   nativeBuildInputs = [ cmake ninja pkg-config shaderc wayland-scanner ];
   buildInputs = [
-    cairo fontconfig freetype harfbuzz libxkbcommon lua5_4
+    # libxml2: zwwm's zwayland-scanner, built with vw, reads protocol XML with it.
+    cairo fontconfig freetype harfbuzz libxkbcommon libxml2 lua5_4
     pam pango pipewire quickjs libsysprof-capture vulkan-headers vulkan-loader wayland
     wayland-protocols
   ];
