@@ -151,17 +151,25 @@ class ToplevelRole final : public Role {
     pending_height_ = 0;
     set_configured_size(target_width, target_height);
     const bool resized = target_width != width() || target_height != height();
-    if (!configured()) {
+    const bool first = !configured();
+    mark_configured();
+    // Commit the ack together with a frame at the new size. Committing the
+    // old buffer first tells the compositor the old size was chosen, and a
+    // compositor that adopts committed sizes for floating windows answers
+    // with that size again, bouncing the window between the two.
+    if (resized && can_render()) {
+      rebuild();
+      if (width() == target_width && height() == target_height) return;
+    }
+    if (first) {
       generated::xdg_surface_set_window_geometry(display(), xdg_surface_->id, 0, 0, width(), height());
       generated::wl_surface_attach(display(), surface()->id, buffer(), 0, 0);
       generated::wl_surface_damage_buffer(display(), surface()->id, 0, 0,
                                           static_cast<std::int32_t>(width()),
                                           static_cast<std::int32_t>(height()));
-      mark_configured();
     }
     generated::wl_surface_commit(display(), surface()->id);
     flush("could not flush configured xdg surface");
-    if (resized && can_render()) rebuild();
   }
 
   std::uint32_t wm_name_ = 0;
