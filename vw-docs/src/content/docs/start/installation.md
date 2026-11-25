@@ -91,8 +91,7 @@ You need a C++23 compiler (clang is what vw is developed with), CMake, Ninja, `p
 | --- | --- |
 | Vulkan loader and headers | rendering |
 | freetype, fontconfig, harfbuzz, pango(cairo) | text |
-| librsvg, libwebp, cairo | SVG, WebP and canvas images |
-| gio, gtk3 | D-Bus services, theme icons |
+| cairo | SVG drawing and canvases |
 | pipewire | audio |
 | libxkbcommon | keyboards |
 | pam | lock screens |

@@ -1,6 +1,6 @@
 #include "vw/brightness.hpp"
 
-#include <gio/gio.h>
+#include "dbus.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -79,24 +79,17 @@ Watcher& watcher() {
 }
 
 bool logind_set(const Backlight& backlight, std::uint32_t value) {
-  GError* error = nullptr;
-  GDBusConnection* bus = g_bus_get_sync(G_BUS_TYPE_SYSTEM, nullptr, &error);
-  if (bus == nullptr) {
-    g_error_free(error);
+  try {
+    dbus::Loop loop;
+    dbus::Connection bus(dbus::Bus::system, loop);
+    return bus.call(dbus::Message::method_call("org.freedesktop.login1", "/org/freedesktop/login1/session/auto",
+                                               "org.freedesktop.login1.Session", "SetBrightness",
+                                               {dbus::Value::string(backlight.subsystem),
+                                                dbus::Value::string(backlight.name), dbus::Value::uint32(value)}))
+        .has_value();
+  } catch (const std::exception&) {
     return false;
   }
-  GVariant* reply = g_dbus_connection_call_sync(
-      bus, "org.freedesktop.login1", "/org/freedesktop/login1/session/auto",
-      "org.freedesktop.login1.Session", "SetBrightness",
-      g_variant_new("(ssu)", backlight.subsystem.c_str(), backlight.name.c_str(), value),
-      nullptr, G_DBUS_CALL_FLAGS_NONE, 1000, nullptr, &error);
-  g_object_unref(bus);
-  if (reply == nullptr) {
-    g_error_free(error);
-    return false;
-  }
-  g_variant_unref(reply);
-  return true;
 }
 
 }  // namespace

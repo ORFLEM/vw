@@ -9,8 +9,7 @@ if(VW_STATIC)
   find_dependency(Vulkan)
   find_dependency(PkgConfig)
   foreach(module "FREETYPE freetype2" "FONTCONFIG fontconfig" "HARFBUZZ harfbuzz"
-                 "GIO_UNIX gio-unix-2.0" "GTK3 gtk+-3.0" "PIPEWIRE libpipewire-0.3"
-                 "RSVG librsvg-2.0" "XKBCOMMON xkbcommon" "PANGOCAIRO pangocairo" "WEBP libwebp")
+                 "PIPEWIRE libpipewire-0.3" "XKBCOMMON xkbcommon" "PANGOCAIRO pangocairo" "CAIRO cairo")
     separate_arguments(module)
     list(GET module 0 prefix)
     list(GET module 1 name)

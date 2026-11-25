@@ -18,14 +18,10 @@ find_library(QUICKJS_LIBRARY quickjs PATH_SUFFIXES quickjs REQUIRED)
 pkg_check_modules(FREETYPE REQUIRED IMPORTED_TARGET freetype2)
 pkg_check_modules(FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
 pkg_check_modules(HARFBUZZ REQUIRED IMPORTED_TARGET harfbuzz)
-pkg_check_modules(GIO_UNIX REQUIRED IMPORTED_TARGET gio-unix-2.0)
-pkg_check_modules(GTK3 REQUIRED IMPORTED_TARGET gtk+-3.0)
 pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
-pkg_check_modules(RSVG REQUIRED IMPORTED_TARGET librsvg-2.0)
 pkg_check_modules(XKBCOMMON REQUIRED IMPORTED_TARGET xkbcommon)
 pkg_check_modules(PANGOCAIRO REQUIRED IMPORTED_TARGET pangocairo)
-pkg_check_modules(WEBP REQUIRED IMPORTED_TARGET libwebp)
-find_path(STB_INCLUDE_DIR stb_image.h PATH_SUFFIXES stb REQUIRED)
+pkg_check_modules(CAIRO REQUIRED IMPORTED_TARGET cairo)
 find_program(GLSLC glslc REQUIRED)
 
 set(ZWAYLAND_ROOT "$ENV{ZWAYLAND_ROOT}" CACHE PATH
@@ -118,6 +114,7 @@ add_library(vw_core ${VW_LIBRARY_TYPE}
   src/hyprland.cpp
   src/icon.cpp
   src/image.cpp
+  src/image_decode.cpp
   src/ipc.cpp
   src/network.cpp
   src/mpris.cpp
@@ -126,11 +123,13 @@ add_library(vw_core ${VW_LIBRARY_TYPE}
   src/process.cpp
   src/renderer.cpp
   src/scene.cpp
+  src/svg.cpp
   src/text.cpp
   src/tray.cpp
   src/ui.cpp
   src/upower.cpp
   src/vws.cpp
+  src/webp_decode.cpp
   src/roles/layer.cpp
   src/roles/lock.cpp
   src/roles/role.cpp
@@ -147,7 +146,7 @@ add_dependencies(vw_core vw-shaders vw-protocol-headers zwwm_protocol_headers)
 target_include_directories(vw_core
   PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
          "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
-  PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" ${STB_INCLUDE_DIR} ${PAM_INCLUDE_DIR})
+  PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" ${PAM_INCLUDE_DIR})
 target_include_directories(vw_core SYSTEM PRIVATE ${QUICKJS_INCLUDE_DIR})
 target_link_libraries(vw_core
   PUBLIC nlohmann_json::nlohmann_json
@@ -156,13 +155,10 @@ target_link_libraries(vw_core
     PkgConfig::FREETYPE
     PkgConfig::FONTCONFIG
     PkgConfig::HARFBUZZ
-    PkgConfig::GIO_UNIX
     PkgConfig::PIPEWIRE
-    PkgConfig::GTK3
-    PkgConfig::RSVG
     PkgConfig::XKBCOMMON
     PkgConfig::PANGOCAIRO
-    PkgConfig::WEBP
+    PkgConfig::CAIRO
     ${PAM_LIBRARY}
     ${QUICKJS_LIBRARY}
     ${CMAKE_DL_LIBS}

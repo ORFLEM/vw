@@ -399,6 +399,8 @@ struct SurfaceProps {
   // Seconds between periodic rebuilds of this surface (events and input
   // still rebuild it at once). Static surfaces can set this high.
   double refresh_interval = 1.0;
+  // Bits a channel in the surface's buffer; see ColorDepth.
+  ColorDepth color_depth = ColorDepth::bits8;
 };
 
 struct ToplevelProps {
@@ -413,6 +415,8 @@ struct ToplevelProps {
   Decorations decorations = Decorations::automatic;
   // The window was closed. Without a handler the whole app exits.
   CloseHandler on_close;
+  // Bits a channel in the window's buffer; see ColorDepth.
+  ColorDepth color_depth = ColorDepth::bits8;
 };
 
 struct SessionLockProps {
@@ -428,6 +432,8 @@ struct SessionLockProps {
 struct LockSurfaceProps {
   std::optional<float> width;
   std::optional<float> height;
+  // Bits a channel in the lock surfaces' buffers; see ColorDepth.
+  ColorDepth color_depth = ColorDepth::bits8;
 };
 
 // Forgets a text field's retained value and focus, e.g. when a popup closes;

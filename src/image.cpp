@@ -1,11 +1,5 @@
 #include "vw/image.hpp"
-
-#define STB_IMAGE_IMPLEMENTATION
-#include <stb_image.h>
-#include <librsvg/rsvg.h>
-#include <cairo.h>
-#include <glib.h>
-#include <webp/decode.h>
+#include "image_decode.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -21,27 +15,26 @@
 namespace vw {
 namespace {
 
+// Decoded pixels: eight bits a channel, or sixteen when the file has more.
 struct DecodedImage {
   int width = 0;
   int height = 0;
   std::filesystem::file_time_type modified;
   Pixels rgba;
+  DeepPixels rgba16;
 };
 
-// Browsers hand out WebP artwork under any extension, so go by the contents.
-bool is_webp(const std::filesystem::path& path) {
-  char header[12] = {};
-  std::ifstream file(path, std::ios::binary);
-  return file.read(header, sizeof(header)) && std::memcmp(header, "RIFF", 4) == 0 &&
-         std::memcmp(header + 8, "WEBP", 4) == 0;
+bool is_svg(const std::filesystem::path& path) {
+  std::string extension = path.extension().string();
+  for (char& c : extension) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  return extension == ".svg" || extension == ".svgz";
 }
 
 std::shared_ptr<const DecodedImage> decode_image(const std::filesystem::path& path,
                                                   float requested_width, float requested_height) {
   static std::mutex mutex;
   static std::unordered_map<std::string, std::shared_ptr<const DecodedImage>> cache;
-  const bool svg = g_ascii_strcasecmp(path.extension().c_str(), ".svg") == 0 ||
-                   g_ascii_strcasecmp(path.extension().c_str(), ".svgz") == 0;
+  const bool svg = is_svg(path);
   const int target_width = requested_width > 0 ? static_cast<int>(std::ceil(requested_width)) : 0;
   const int target_height = requested_height > 0 ? static_cast<int>(std::ceil(requested_height)) : 0;
   const std::string key = path.string() + (svg ? ":" + std::to_string(target_width) +
@@ -51,100 +44,27 @@ std::shared_ptr<const DecodedImage> decode_image(const std::filesystem::path& pa
   if (const auto found = cache.find(key);
       found != cache.end() && found->second->modified == modified) return found->second;
 
-  int width = 0;
-  int height = 0;
-  auto decoded = std::make_shared<DecodedImage>();
-  std::vector<std::uint32_t> rgba;
-  decoded->modified = modified;
-  if (svg) {
-    GError* error = nullptr;
-    RsvgHandle* handle = rsvg_handle_new_from_file(path.c_str(), &error);
-    if (handle == nullptr) {
-      const std::string message = error == nullptr ? "unknown error" : error->message;
-      if (error != nullptr) g_error_free(error);
-      throw std::runtime_error("could not load SVG " + path.string() + ": " + message);
-    }
-    double intrinsic_width = 0.0, intrinsic_height = 0.0;
-    if (!rsvg_handle_get_intrinsic_size_in_pixels(handle, &intrinsic_width, &intrinsic_height)) {
-      intrinsic_width = 64;
-      intrinsic_height = 64;
-    }
-    if (intrinsic_width <= 0 || intrinsic_height <= 0) {
-      intrinsic_width = 64;
-      intrinsic_height = 64;
-    }
-    width = target_width > 0 ? target_width :
-        static_cast<int>(std::ceil(target_height > 0 ? intrinsic_width * target_height / intrinsic_height
-                                                    : intrinsic_width));
-    height = target_height > 0 ? target_height :
-        static_cast<int>(std::ceil(target_width > 0 ? intrinsic_height * target_width / intrinsic_width
-                                                   : intrinsic_height));
-    if (width < 1 || height < 1 || width > 8192 || height > 8192) {
-      g_object_unref(handle);
-      throw std::runtime_error("SVG dimensions must be between 1 and 8192 pixels");
-    }
-    cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
-    cairo_t* context = cairo_create(surface);
-    const RsvgRectangle viewport{0.0, 0.0, static_cast<double>(width), static_cast<double>(height)};
-    const bool rendered = rsvg_handle_render_document(handle, context, &viewport, &error);
-    cairo_destroy(context);
-    g_object_unref(handle);
-    if (!rendered) {
-      const std::string message = error == nullptr ? "unknown error" : error->message;
-      if (error != nullptr) g_error_free(error);
-      cairo_surface_destroy(surface);
-      throw std::runtime_error("could not render SVG " + path.string() + ": " + message);
-    }
-    cairo_surface_flush(surface);
-    const auto* pixels = cairo_image_surface_get_data(surface);
-    const int stride = cairo_image_surface_get_stride(surface);
-    rgba.resize(static_cast<std::size_t>(width) * height);
-    for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x) {
-      const auto* pixel = pixels + y * stride + x * 4;
-      const unsigned int alpha = pixel[3];
-      const auto unpremultiply = [alpha](unsigned int value) -> std::uint32_t {
-        return alpha == 0 ? 0 : std::min(255U, (value * 255U + alpha / 2U) / alpha);
-      };
-      rgba[static_cast<std::size_t>(y) * width + x] =
-          unpremultiply(pixel[2]) | unpremultiply(pixel[1]) << 8U |
-          unpremultiply(pixel[0]) << 16U | alpha << 24U;
-    }
-    cairo_surface_destroy(surface);
-  } else if (is_webp(path)) {
-    std::ifstream file(path, std::ios::binary);
-    const std::vector<char> bytes{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
-    using Pixels = std::unique_ptr<std::uint8_t, decltype(&WebPFree)>;
-    const Pixels source(WebPDecodeRGBA(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size(), &width, &height),
-                        &WebPFree);
-    if (!source) throw std::runtime_error("could not decode WebP image " + key);
-    rgba.resize(static_cast<std::size_t>(width) * height);
-    std::memcpy(rgba.data(), source.get(), rgba.size() * sizeof(std::uint32_t));
-  } else {
-    int channels = 0;
-    using Pixels = std::unique_ptr<stbi_uc, decltype(&stbi_image_free)>;
-    Pixels source(stbi_load(path.c_str(), &width, &height, &channels, STBI_rgb_alpha),
-                  &stbi_image_free);
-    if (!source) {
-      const char* reason = stbi_failure_reason();
-      throw std::runtime_error("could not decode image " + key +
-                               (reason == nullptr ? "" : ": " + std::string(reason)));
-    }
-    rgba.resize(static_cast<std::size_t>(width) * height);
-    for (std::size_t index = 0; index < rgba.size(); ++index) {
-      const std::size_t i = index * 4;
-      rgba[index] = static_cast<std::uint32_t>(source.get()[i]) |
-                             static_cast<std::uint32_t>(source.get()[i + 1]) << 8U |
-                             static_cast<std::uint32_t>(source.get()[i + 2]) << 16U |
-                             static_cast<std::uint32_t>(source.get()[i + 3]) << 24U;
-    }
+  std::ifstream file(path, std::ios::binary);
+  if (!file) throw std::runtime_error("could not open image " + path.string());
+  const std::vector<std::uint8_t> bytes{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+  detail::DecodedRaster raster;
+  try {
+    raster = svg ? detail::render_svg(bytes, target_width, target_height, path.parent_path())
+                 : detail::decode_raster(bytes);
+  } catch (const std::exception& error) {
+    throw std::runtime_error(std::string(svg ? "could not render SVG " : "could not decode image ") + key + ": " +
+                             error.what());
   }
-  decoded->rgba = std::make_shared<const std::vector<std::uint32_t>>(std::move(rgba));
-  decoded->width = width;
-  decoded->height = height;
+  auto decoded = std::make_shared<DecodedImage>();
+  decoded->modified = modified;
+  decoded->width = raster.width;
+  decoded->height = raster.height;
+  if (raster.deep()) decoded->rgba16 = std::make_shared<const std::vector<std::uint64_t>>(std::move(raster.rgba16));
+  else decoded->rgba = std::make_shared<const std::vector<std::uint32_t>>(std::move(raster.rgba));
   // Huge photos (wallpapers) are only ever drawn fitted, and the fitted
   // result is cached: keeping a 100 MB decode around would only cost memory.
   constexpr std::size_t retained_pixels = 16U * 1024U * 1024U;
-  if (static_cast<std::size_t>(width) * static_cast<std::size_t>(height) <= retained_pixels)
+  if (static_cast<std::size_t>(raster.width) * static_cast<std::size_t>(raster.height) <= retained_pixels)
     cache[key] = decoded;
   return decoded;
 }
@@ -163,12 +83,14 @@ struct Crop {
 // The source region `crop`, area-averaged down to target_width x
 // target_height when it is larger (never upscaled: the raster shader
 // stretches). Averaging per channel is enough for photos and icons.
-std::vector<std::uint32_t> resample(const DecodedImage& source, const Crop& crop, int target_width,
-                                    int target_height) {
-  std::vector<std::uint32_t> pixels(static_cast<std::size_t>(target_width) * target_height);
+template <typename Pixel>
+std::vector<Pixel> resample(const std::vector<Pixel>& source, int source_width, const Crop& crop,
+                            int target_width, int target_height) {
+  constexpr int bits = sizeof(Pixel) * 2;
+  constexpr Pixel mask = (Pixel{1} << bits) - 1;
+  std::vector<Pixel> pixels(static_cast<std::size_t>(target_width) * static_cast<std::size_t>(target_height));
   const double step_x = static_cast<double>(crop.width) / target_width;
   const double step_y = static_cast<double>(crop.height) / target_height;
-  const auto* rgba = source.rgba->data();
   for (int y = 0; y < target_height; ++y) {
     const int y0 = crop.y + static_cast<int>(y * step_y);
     const int y1 = std::max(y0 + 1, std::min(crop.y + crop.height, crop.y + static_cast<int>((y + 1) * step_y)));
@@ -178,14 +100,14 @@ std::vector<std::uint32_t> resample(const DecodedImage& source, const Crop& crop
       std::uint64_t sum[4] = {0, 0, 0, 0};
       for (int sy = y0; sy < y1; ++sy)
         for (int sx = x0; sx < x1; ++sx) {
-          const std::uint32_t pixel = rgba[static_cast<std::size_t>(sy) * source.width + sx];
-          for (int channel = 0; channel < 4; ++channel) sum[channel] += (pixel >> (channel * 8)) & 0xffU;
+          const Pixel pixel = source[static_cast<std::size_t>(sy) * static_cast<std::size_t>(source_width) + static_cast<std::size_t>(sx)];
+          for (int channel = 0; channel < 4; ++channel) sum[channel] += (pixel >> (channel * bits)) & mask;
         }
       const auto count = static_cast<std::uint64_t>((x1 - x0) * (y1 - y0));
-      std::uint32_t result = 0;
+      Pixel result = 0;
       for (int channel = 0; channel < 4; ++channel)
-        result |= static_cast<std::uint32_t>(sum[channel] / count) << (channel * 8);
-      pixels[static_cast<std::size_t>(y) * target_width + x] = result;
+        result |= static_cast<Pixel>((sum[channel] + count / 2) / count) << (channel * bits);
+      pixels[static_cast<std::size_t>(y) * static_cast<std::size_t>(target_width) + static_cast<std::size_t>(x)] = result;
     }
   }
   return pixels;
@@ -195,6 +117,7 @@ std::vector<std::uint32_t> resample(const DecodedImage& source, const Crop& crop
 // wallpaper is decoded, cropped and scaled once rather than on every build.
 struct Fitted {
   Pixels pixels;
+  DeepPixels deep;
   std::uint32_t pixel_width = 0;
   std::uint32_t pixel_height = 0;
   float width = 0;
@@ -216,6 +139,16 @@ Fitted fit_image(const DecodedImage& source_image, float width, float height, Im
   std::uint32_t source_width = static_cast<std::uint32_t>(source->width);
   std::uint32_t source_height = static_cast<std::uint32_t>(source->height);
   Pixels pixels = source->rgba;
+  DeepPixels deep = source->rgba16;
+  const auto scale = [&](const Crop& crop, int target_width, int target_height) {
+    if (deep) {
+      deep = std::make_shared<const std::vector<std::uint64_t>>(
+          resample(*source->rgba16, source->width, crop, target_width, target_height));
+    } else {
+      pixels = std::make_shared<const std::vector<std::uint32_t>>(
+          resample(*source->rgba, source->width, crop, target_width, target_height));
+    }
+  };
   if (sized && source->width > 0 && source->height > 0) {
     const double box = static_cast<double>(width) / height;
     const double image = static_cast<double>(source->width) / source->height;
@@ -237,13 +170,11 @@ Fitted fit_image(const DecodedImage& source_image, float width, float height, Im
     if (crop.width > target_width || crop.height > target_height) {
       const int scaled_width = std::min(crop.width, target_width);
       const int scaled_height = std::min(crop.height, target_height);
-      pixels = std::make_shared<const std::vector<std::uint32_t>>(
-          resample(*source, crop, scaled_width, scaled_height));
+      scale(crop, scaled_width, scaled_height);
       source_width = static_cast<std::uint32_t>(scaled_width);
       source_height = static_cast<std::uint32_t>(scaled_height);
     } else if (crop.width != source->width || crop.height != source->height) {
-      pixels = std::make_shared<const std::vector<std::uint32_t>>(
-          resample(*source, crop, crop.width, crop.height));
+      scale(crop, crop.width, crop.height);
       source_width = static_cast<std::uint32_t>(crop.width);
       source_height = static_cast<std::uint32_t>(crop.height);
     }
@@ -255,7 +186,7 @@ Fitted fit_image(const DecodedImage& source_image, float width, float height, Im
   if (output_width == 0 || output_height == 0 || output_width > 8192 || output_height > 8192) {
     throw std::runtime_error("image dimensions must be between 1 and 8192 pixels");
   }
-  const Fitted fitted{std::move(pixels), source_width, source_height,
+  const Fitted fitted{deep ? Pixels{} : std::move(pixels), std::move(deep), source_width, source_height,
                       static_cast<float>(output_width), static_cast<float>(output_height)};
   return fitted;
 }
@@ -275,6 +206,7 @@ void push_fitted(Scene& scene, const Fitted& fitted, const Rectangle& style) {
   raster.width = fitted.pixel_width;
   raster.height = fitted.pixel_height;
   raster.rgba = fitted.pixels;
+  raster.rgba16 = fitted.deep;
   scene.rasters.push_back(std::move(raster));
 }
 
@@ -282,6 +214,7 @@ void push_fitted(Scene& scene, const Fitted& fitted, const Rectangle& style) {
 // build is downscaled once. Holding the pixels keeps the key unambiguous.
 struct FittedBitmap {
   Pixels source;
+  DeepPixels deep_source;
   float width = 0;
   float height = 0;
   ImageFit fit = ImageFit::stretch;
@@ -298,19 +231,21 @@ std::vector<FittedBitmap>& fitted_bitmaps() {
 std::pair<float, float> add_image(Scene& scene, const Bitmap& bitmap,
                                   float width, float height, const Rectangle& style,
                                   ImageFit fit) {
-  if (bitmap.empty() || bitmap.rgba->size() != static_cast<std::size_t>(bitmap.width) * bitmap.height)
+  const std::size_t count = static_cast<std::size_t>(bitmap.width) * bitmap.height;
+  if (bitmap.empty() || (bitmap.rgba16 ? bitmap.rgba16->size() : bitmap.rgba->size()) != count)
     throw std::invalid_argument("bitmap pixels do not match its size");
+  const Pixels pixels = bitmap.rgba16 ? Pixels{} : bitmap.rgba;
   std::lock_guard lock(fitted_mutex);
   auto& cache = fitted_bitmaps();
   const auto found = std::ranges::find_if(cache, [&](const FittedBitmap& entry) {
-    return entry.source == bitmap.rgba && entry.width == width && entry.height == height &&
-           entry.fit == fit;
+    return entry.source == pixels && entry.deep_source == bitmap.rgba16 && entry.width == width &&
+           entry.height == height && entry.fit == fit;
   });
   if (found == cache.end()) {
-    const DecodedImage source{static_cast<int>(bitmap.width), static_cast<int>(bitmap.height), {},
-                              bitmap.rgba};
+    const DecodedImage source{static_cast<int>(bitmap.width), static_cast<int>(bitmap.height), {}, pixels,
+                              bitmap.rgba16};
     if (cache.size() >= 16) cache.erase(cache.begin());
-    cache.push_back({bitmap.rgba, width, height, fit, fit_image(source, width, height, fit)});
+    cache.push_back({pixels, bitmap.rgba16, width, height, fit, fit_image(source, width, height, fit)});
   }
   const Fitted& fitted = found == cache.end() ? cache.back().fitted : found->fitted;
   push_fitted(scene, fitted, style);

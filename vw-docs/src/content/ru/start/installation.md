@@ -91,8 +91,7 @@ pkgs = import nixpkgs { inherit system; overlays = [ vw.overlays.default ]; };
 | --- | --- |
 | загрузчик и заголовки Vulkan | отрисовка |
 | freetype, fontconfig, harfbuzz, pango(cairo) | текст |
-| librsvg, libwebp, cairo | картинки SVG, WebP и canvas |
-| gio, gtk3 | сервисы D-Bus, иконки темы |
+| cairo | отрисовка SVG и canvas |
 | pipewire | звук |
 | libxkbcommon | клавиатуры |
 | pam | экраны блокировки |

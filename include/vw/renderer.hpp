@@ -16,6 +16,8 @@ struct Frame {
   int fd = -1;
   std::uint32_t stride = 0;
   std::uint64_t modifier = 0;
+  // DRM fourcc of the pixels: AB24, or AB30/AB48 for deeper scenes.
+  std::uint32_t drm_format = 0x34324241U;
 
   ~Frame();
   Frame(Frame&& other) noexcept;

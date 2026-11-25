@@ -95,6 +95,50 @@ std::uint32_t memory_type(VkPhysicalDevice physical_device, std::uint32_t allowe
   throw std::runtime_error("no compatible Vulkan memory type");
 }
 
+// The Vulkan and DRM formats for a colour depth.
+VkFormat vulkan_format(ColorDepth depth) {
+  switch (depth) {
+    case ColorDepth::bits10: return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+    case ColorDepth::bits16: return VK_FORMAT_R16G16B16A16_UNORM;
+    default: return VK_FORMAT_R8G8B8A8_UNORM;
+  }
+}
+
+std::uint32_t drm_format(ColorDepth depth) {
+  switch (depth) {
+    case ColorDepth::bits10: return 0x30334241U;  // AB30
+    case ColorDepth::bits16: return 0x38344241U;  // AB48
+    default: return 0x34324241U;                  // AB24
+  }
+}
+
+// Shaders declare their storage images rgba8. For a deeper target the
+// SPIR-V is retargeted: every Rgba8 image format becomes Rgb10A2 or Rgba16,
+// which needs the StorageImageExtendedFormats capability.
+std::vector<std::uint32_t> retarget(std::vector<std::uint32_t> code, ColorDepth depth) {
+  if (depth == ColorDepth::bits8 || code.size() < 5) return code;
+  constexpr std::uint32_t op_capability = 17, op_type_image = 25;
+  constexpr std::uint32_t format_rgba8 = 4, format_rgba16 = 10, format_rgb10a2 = 11;
+  constexpr std::uint32_t extended_formats = 49;
+  const std::uint32_t format = depth == ColorDepth::bits10 ? format_rgb10a2 : format_rgba16;
+  bool patched = false, declared = false;
+  for (std::size_t i = 5; i < code.size();) {
+    const std::uint32_t count = code[i] >> 16U;
+    const std::uint32_t opcode = code[i] & 0xFFFFU;
+    if (count == 0 || i + count > code.size()) break;
+    if (opcode == op_capability && count >= 2 && code[i + 1] == extended_formats) declared = true;
+    if (opcode == op_type_image && count >= 9 && code[i + 8] == format_rgba8) {
+      code[i + 8] = format;
+      patched = true;
+    }
+    i += count;
+  }
+  if (patched && !declared) code.insert(code.begin() + 5, {2U << 16U | op_capability, extended_formats});
+  return code;
+}
+
+std::size_t depth_index(ColorDepth depth) { return static_cast<std::size_t>(depth); }
+
 // Where compiled GLSL is kept between runs: $XDG_CACHE_HOME/vw/shaders.
 std::filesystem::path shader_cache_directory() {
   if (const char* cache = std::getenv("XDG_CACHE_HOME"); cache != nullptr && *cache != '\0')
@@ -176,8 +220,10 @@ struct Renderer::State {
   VkCommandPool command_pool = VK_NULL_HANDLE;
   VkDescriptorSetLayout descriptor_layout = VK_NULL_HANDLE;
   VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
-  VkPipeline pipeline = VK_NULL_HANDLE;
-  VkPipeline raster_pipeline = VK_NULL_HANDLE;
+  // Built-in pipelines for each colour depth, made on first use.
+  std::array<VkPipeline, 3> pipelines{};
+  std::array<VkPipeline, 3> raster_pipelines{};
+  bool extended_formats = false;
   struct ShaderPipeline {
     VkPipeline pipeline = VK_NULL_HANDLE;
     std::filesystem::file_time_type modified;
@@ -185,18 +231,68 @@ struct Renderer::State {
     // False for the plain rectangle pipeline standing in for a broken shader.
     bool owned = true;
   };
-  std::unordered_map<std::string, ShaderPipeline> custom_pipelines;
+  std::array<std::unordered_map<std::string, ShaderPipeline>, 3> custom_pipelines;
+
+  VkPipeline make_pipeline(const std::vector<std::uint32_t>& spirv, ColorDepth depth) {
+    const std::vector<std::uint32_t> code = retarget(spirv, depth);
+    const VkShaderModuleCreateInfo shader_info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        nullptr, 0, code.size() * sizeof(std::uint32_t), code.data()};
+    VkShaderModule shader = VK_NULL_HANDLE;
+    check(vkCreateShaderModule(device, &shader_info, nullptr, &shader), "vkCreateShaderModule");
+    const VkPipelineShaderStageCreateInfo stage{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, shader, "main", nullptr};
+    const VkComputePipelineCreateInfo info{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        nullptr, 0, stage, pipeline_layout, VK_NULL_HANDLE, 0};
+    VkPipeline created = VK_NULL_HANDLE;
+    const VkResult result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &info, nullptr, &created);
+    vkDestroyShaderModule(device, shader, nullptr);
+    check(result, "vkCreateComputePipelines");
+    return created;
+  }
+
+  VkPipeline rectangle_builtin(ColorDepth depth) {
+    VkPipeline& slot = pipelines[depth_index(depth)];
+    if (slot == VK_NULL_HANDLE) slot = make_pipeline(load_builtin("rounded_rect").spirv, depth);
+    return slot;
+  }
+
+  VkPipeline raster_builtin(ColorDepth depth) {
+    VkPipeline& slot = raster_pipelines[depth_index(depth)];
+    if (slot == VK_NULL_HANDLE) slot = make_pipeline(load_builtin("raster").spirv, depth);
+    return slot;
+  }
+
+  // Whether this GPU can draw into and export the depth's format.
+  void require(ColorDepth depth) {
+    if (depth == ColorDepth::bits8) return;
+    const char* name = depth == ColorDepth::bits10 ? "10-bit" : "16-bit";
+    if (!extended_formats)
+      throw std::runtime_error(std::string("the GPU cannot draw ") + name +
+                               " surfaces (no shaderStorageImageExtendedFormats)");
+    VkDrmFormatModifierPropertiesListEXT modifiers{VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT,
+                                                   nullptr, 0, nullptr};
+    VkFormatProperties2 properties{VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2, &modifiers, {}};
+    vkGetPhysicalDeviceFormatProperties2(physical_device, vulkan_format(depth), &properties);
+    std::vector<VkDrmFormatModifierPropertiesEXT> list(modifiers.drmFormatModifierCount);
+    modifiers.pDrmFormatModifierProperties = list.data();
+    vkGetPhysicalDeviceFormatProperties2(physical_device, vulkan_format(depth), &properties);
+    for (const auto& entry : list)
+      if (entry.drmFormatModifier == 0 && (entry.drmFormatModifierTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0)
+        return;
+    throw std::runtime_error(std::string("the GPU cannot write ") + name + " images it can share with the compositor");
+  }
 
   // A custom shader's pipeline and what it reads; rebuilt when the file
   // changes. GLSL source is compiled on first use. A shader that does not
   // load is reported once per version of the file and drawn as a plain
   // rectangle, so a typo while editing does not take the surface down.
-  ShaderPipeline rectangle_pipeline(const std::string& path) {
-    if (path.empty()) return {pipeline, {}, 0, false};
+  ShaderPipeline rectangle_pipeline(const std::string& path, ColorDepth depth) {
+    if (path.empty()) return {rectangle_builtin(depth), {}, 0, false};
+    auto& custom = custom_pipelines[depth_index(depth)];
     std::error_code error;
     const auto modified = std::filesystem::last_write_time(path, error);
-    const auto found = custom_pipelines.find(path);
-    if (found != custom_pipelines.end() && (error || found->second.modified == modified))
+    const auto found = custom.find(path);
+    if (found != custom.end() && (error || found->second.modified == modified))
       return found->second;
     LoadedShader loaded;
     try {
@@ -204,28 +300,16 @@ struct Renderer::State {
       loaded = load_or_compile(path, modified);
     } catch (const std::exception& failure) {
       std::cerr << "vw: " << failure.what() << '\n';
-      if (found != custom_pipelines.end() && found->second.owned)
+      if (found != custom.end() && found->second.owned)
         vkDestroyPipeline(device, found->second.pipeline, nullptr);
-      custom_pipelines[path] = ShaderPipeline{pipeline, modified, 0, false};
-      return custom_pipelines[path];
+      custom[path] = ShaderPipeline{rectangle_builtin(depth), modified, 0, false};
+      return custom[path];
     }
-    const auto& code = loaded.spirv;
-    const VkShaderModuleCreateInfo module_info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-        nullptr, 0, code.size() * sizeof(std::uint32_t), code.data()};
-    VkShaderModule module = VK_NULL_HANDLE;
-    check(vkCreateShaderModule(device, &module_info, nullptr, &module), "vkCreateShaderModule(custom)");
-    const VkPipelineShaderStageCreateInfo stage{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, module, "main", nullptr};
-    const VkComputePipelineCreateInfo info{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-        nullptr, 0, stage, pipeline_layout, VK_NULL_HANDLE, 0};
-    VkPipeline created = VK_NULL_HANDLE;
-    const VkResult result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &info, nullptr, &created);
-    vkDestroyShaderModule(device, module, nullptr);
-    check(result, "vkCreateComputePipelines(custom)");
-    if (found != custom_pipelines.end() && found->second.owned)
+    const VkPipeline created = make_pipeline(loaded.spirv, depth);
+    if (found != custom.end() && found->second.owned)
       vkDestroyPipeline(device, found->second.pipeline, nullptr);
-    custom_pipelines[path] = ShaderPipeline{created, modified, loaded.flags, true};
-    return custom_pipelines[path];
+    custom[path] = ShaderPipeline{created, modified, loaded.flags, true};
+    return custom[path];
   }
 
   State() {
@@ -265,10 +349,16 @@ struct Renderer::State {
         VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
         VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
         VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME};
+    // Deeper surfaces write rgb10_a2 and rgba16 storage images.
+    VkPhysicalDeviceFeatures supported{};
+    vkGetPhysicalDeviceFeatures(physical_device, &supported);
+    VkPhysicalDeviceFeatures enabled{};
+    enabled.shaderStorageImageExtendedFormats = supported.shaderStorageImageExtendedFormats;
+    extended_formats = supported.shaderStorageImageExtendedFormats == VK_TRUE;
     const VkDeviceCreateInfo device_info{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, nullptr, 0, 1,
                                           &queue_info, 0, nullptr,
                                           static_cast<std::uint32_t>(extensions.size()),
-                                          extensions.data(), nullptr};
+                                          extensions.data(), &enabled};
     check(vkCreateDevice(physical_device, &device_info, nullptr, &device), "vkCreateDevice");
     vkGetDeviceQueue(device, queue_family, 0, &queue);
 
@@ -296,31 +386,19 @@ struct Renderer::State {
     check(vkCreatePipelineLayout(device, &layout_info, nullptr, &pipeline_layout),
           "vkCreatePipelineLayout");
 
-    const auto create_pipeline = [&](std::string_view name, VkPipeline& target) {
-      const auto code = load_builtin(name).spirv;
-      const VkShaderModuleCreateInfo shader_info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-          nullptr, 0, code.size() * sizeof(std::uint32_t), code.data()};
-      VkShaderModule shader = VK_NULL_HANDLE;
-      check(vkCreateShaderModule(device, &shader_info, nullptr, &shader), "vkCreateShaderModule");
-      const VkPipelineShaderStageCreateInfo stage{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-          nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, shader, "main", nullptr};
-      const VkComputePipelineCreateInfo info{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-          nullptr, 0, stage, pipeline_layout, VK_NULL_HANDLE, 0};
-      const VkResult result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &info, nullptr,
-                                                        &target);
-      vkDestroyShaderModule(device, shader, nullptr);
-      check(result, "vkCreateComputePipelines");
-    };
-    create_pipeline("rounded_rect", pipeline);
-    create_pipeline("raster", raster_pipeline);
+    rectangle_builtin(ColorDepth::bits8);
+    raster_builtin(ColorDepth::bits8);
   }
 
   ~State() {
     if (device != VK_NULL_HANDLE) vkDeviceWaitIdle(device);
-    for (const auto& [path, entry] : custom_pipelines)
-      vkDestroyPipeline(device, entry.pipeline, nullptr);
-    if (pipeline != VK_NULL_HANDLE) vkDestroyPipeline(device, pipeline, nullptr);
-    if (raster_pipeline != VK_NULL_HANDLE) vkDestroyPipeline(device, raster_pipeline, nullptr);
+    for (const auto& custom : custom_pipelines)
+      for (const auto& [path, entry] : custom)
+        if (entry.owned) vkDestroyPipeline(device, entry.pipeline, nullptr);
+    for (VkPipeline built : pipelines)
+      if (built != VK_NULL_HANDLE) vkDestroyPipeline(device, built, nullptr);
+    for (VkPipeline built : raster_pipelines)
+      if (built != VK_NULL_HANDLE) vkDestroyPipeline(device, built, nullptr);
     if (pipeline_layout != VK_NULL_HANDLE) vkDestroyPipelineLayout(device, pipeline_layout, nullptr);
     if (descriptor_layout != VK_NULL_HANDLE)
       vkDestroyDescriptorSetLayout(device, descriptor_layout, nullptr);
@@ -346,11 +424,16 @@ Frame Renderer::render(const Scene& scene) const {
   std::vector<bool> reads_backdrop;
   // One time for every shader in the frame, so they move together.
   const float time = shader_time();
+  const ColorDepth depth = scene.color_depth;
+  state_->require(depth);
+  const VkFormat format = vulkan_format(depth);
+  const VkPipeline plain_pipeline = state_->rectangle_builtin(depth);
+  const VkPipeline raster_pipeline = state_->raster_builtin(depth);
   rectangle_pipelines.reserve(scene.rectangles.size());
   reads_backdrop.reserve(scene.rectangles.size());
   for (const Rectangle& rectangle : scene.rectangles) {
-    const auto shader = rectangle.visible ? state_->rectangle_pipeline(rectangle.shader)
-                                          : State::ShaderPipeline{state_->pipeline, {}, 0};
+    const auto shader = rectangle.visible ? state_->rectangle_pipeline(rectangle.shader, depth)
+                                          : State::ShaderPipeline{plain_pipeline, {}, 0, false};
     rectangle_pipelines.push_back(shader.pipeline);
     reads_backdrop.push_back((shader.flags & vws::reads_backdrop) != 0);
   }
@@ -387,7 +470,7 @@ Frame Renderer::render(const Scene& scene) const {
         VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
     const VkImageCreateInfo image_info{
         VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, &external_image, 0, VK_IMAGE_TYPE_2D,
-        VK_FORMAT_R8G8B8A8_UNORM, {scene.width, scene.height, 1}, 1, 1,
+        format, {scene.width, scene.height, 1}, 1, 1,
         VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
         VK_SHARING_MODE_EXCLUSIVE, 0, nullptr, VK_IMAGE_LAYOUT_UNDEFINED};
@@ -406,7 +489,7 @@ Frame Renderer::render(const Scene& scene) const {
 
     const VkImageViewCreateInfo view_info{
         VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, nullptr, 0, image, VK_IMAGE_VIEW_TYPE_2D,
-        VK_FORMAT_R8G8B8A8_UNORM, {}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+        format, {}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
     check(vkCreateImageView(state_->device, &view_info, nullptr, &image_view),
            "vkCreateImageView");
 
@@ -431,10 +514,12 @@ Frame Renderer::render(const Scene& scene) const {
     // text between pixels uses its copy rasterized at that offset.
     std::vector<std::array<float, 2>> raster_positions(scene.rasters.size());
     std::vector<Pixels> raster_sources(scene.rasters.size());
+    std::vector<DeepPixels> deep_sources(scene.rasters.size());
     for (std::size_t index = 0; index < scene.rasters.size(); ++index) {
       const Raster& raster = scene.rasters[index];
       const Rectangle& carrier = scene.rectangles.at(raster.carrier);
       raster_sources[index] = raster.rgba;
+      deep_sources[index] = raster.rgba16;
       if (raster.shifted) {
         const auto place = [](float value, int& quarter) {
           const float whole = std::floor(value);
@@ -453,9 +538,22 @@ Frame Renderer::render(const Scene& scene) const {
         raster_positions[index] = {carrier.x, carrier.y};
       }
     }
+    // Each raster's pixels in turn: one word a pixel, or two for sixteen-bit
+    // pixels (red and green, then blue and alpha).
     std::vector<std::uint32_t> raster_pixels;
-    for (const Pixels& pixels : raster_sources)
-      if (pixels) raster_pixels.insert(raster_pixels.end(), pixels->begin(), pixels->end());
+    std::vector<std::uint32_t> raster_offsets(scene.rasters.size());
+    for (std::size_t index = 0; index < scene.rasters.size(); ++index) {
+      raster_offsets[index] = static_cast<std::uint32_t>(raster_pixels.size());
+      if (const DeepPixels& deep = deep_sources[index]; deep && !scene.rasters[index].shifted) {
+        raster_pixels.reserve(raster_pixels.size() + deep->size() * 2);
+        for (const std::uint64_t pixel : *deep) {
+          raster_pixels.push_back(static_cast<std::uint32_t>(pixel));
+          raster_pixels.push_back(static_cast<std::uint32_t>(pixel >> 32U));
+        }
+      } else if (const Pixels& pixels = raster_sources[index]) {
+        raster_pixels.insert(raster_pixels.end(), pixels->begin(), pixels->end());
+      }
+    }
     // Custom shader data follows the pixels in the same buffer; the shader
     // finds it through clip_params.y (offset) and .z (count).
     std::vector<std::uint32_t> data_offsets(scene.rectangles.size(), 0);
@@ -548,37 +646,32 @@ Frame Renderer::render(const Scene& scene) const {
 
     vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, state_->pipeline_layout, 0,
                              1, &descriptor, 0, nullptr);
-    vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, state_->pipeline);
+    vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, plain_pipeline);
     bool backdrop_initialized = false;
     // Text and images draw in scene order: each raster right after the
     // rectangle that carries it, so a later panel covers earlier text.
-    std::vector<std::uint32_t> raster_offsets(scene.rasters.size());
     std::vector<std::vector<std::size_t>> carried(scene.rectangles.size());
-    {
-      std::uint32_t offset = 0;
-      for (std::size_t raster_index = 0; raster_index < scene.rasters.size(); ++raster_index) {
-        raster_offsets[raster_index] = offset;
-        offset += static_cast<std::uint32_t>(raster_sources[raster_index] ? raster_sources[raster_index]->size() : 0);
-        carried.at(scene.rasters[raster_index].carrier).push_back(raster_index);
-      }
-    }
+    for (std::size_t raster_index = 0; raster_index < scene.rasters.size(); ++raster_index)
+      carried.at(scene.rasters[raster_index].carrier).push_back(raster_index);
     const auto draw_raster = [&](std::size_t raster_index) {
       const Raster& raster = scene.rasters[raster_index];
       const Rectangle& carrier = scene.rectangles.at(raster.carrier);
       if (!carrier.raster_visible) return;
-      vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, state_->raster_pipeline);
+      vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, raster_pipeline);
       const auto [raster_x, raster_y] = raster_positions[raster_index];
+      // Buffer offsets travel as their bits: floats would round past 2^24.
+      const bool deep = deep_sources[raster_index] && !raster.shifted;
       const RasterPushConstants push{
           {raster_x, raster_y, carrier.width, carrier.height},
-          {static_cast<float>(raster_offsets[raster_index]), static_cast<float>(raster.width),
+          {std::bit_cast<float>(raster_offsets[raster_index]), static_cast<float>(raster.width),
             static_cast<float>(raster.height), raster.use_tint ? 1.0F : 0.0F},
           carrier.color, carrier.clip,
            {carrier.radius, carrier.clip_radius, carrier.color[3],
-            raster.alpha_mask ? 1.0F : 0.0F},
+            deep ? 2.0F : raster.alpha_mask ? 1.0F : 0.0F},
           {raster.effect.saturation, raster.effect.hue_rotate * 3.14159265F / 180.0F, raster.effect.colorize_amount,
            static_cast<float>(raster.mask.size() / 2)},
           {raster.effect.colorize[0], raster.effect.colorize[1], raster.effect.colorize[2],
-           static_cast<float>(mask_offsets[raster_index])}};
+           std::bit_cast<float>(mask_offsets[raster_index])}};
       vkCmdPushConstants(command, state_->pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                          sizeof(push), &push);
       vkCmdDispatch(command,
@@ -693,6 +786,7 @@ Frame Renderer::render(const Scene& scene) const {
     check(get_fd(state_->device, &fd_info, &dma_fd), "vkGetMemoryFdKHR");
     Frame frame{scene.width, scene.height, dma_fd,
                 static_cast<std::uint32_t>(layout.rowPitch), modifier.drmFormatModifier};
+    frame.drm_format = drm_format(depth);
     cleanup();
     return frame;
   } catch (...) {
@@ -712,7 +806,7 @@ Frame::Frame(std::uint32_t frame_width, std::uint32_t frame_height, int frame_fd
 
 Frame::Frame(Frame&& other) noexcept
     : width(other.width), height(other.height), fd(other.fd), stride(other.stride),
-      modifier(other.modifier) {
+      modifier(other.modifier), drm_format(other.drm_format) {
   other.fd = -1;
 }
 
@@ -724,6 +818,7 @@ Frame& Frame::operator=(Frame&& other) noexcept {
   fd = other.fd;
   stride = other.stride;
   modifier = other.modifier;
+  drm_format = other.drm_format;
   other.fd = -1;
   return *this;
 }

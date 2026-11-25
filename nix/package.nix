@@ -15,20 +15,14 @@
   cairo,
   fontconfig,
   freetype,
-  glib,
-  gtk3,
   harfbuzz,
-  libwebp,
   libxkbcommon,
-  libxml2,
-  librsvg,
   lua5_4,
   nlohmann_json,
   pam,
   pango,
   pipewire,
   quickjs,
-  stb,
   libsysprof-capture,
   vulkan-headers,
   vulkan-loader,
@@ -43,8 +37,8 @@ clangStdenv.mkDerivation {
 
   nativeBuildInputs = [ cmake ninja pkg-config shaderc wayland-scanner ];
   buildInputs = [
-    cairo fontconfig freetype glib gtk3 harfbuzz libwebp libxkbcommon libxml2 librsvg lua5_4
-    pam pango pipewire quickjs stb libsysprof-capture vulkan-headers vulkan-loader wayland
+    cairo fontconfig freetype harfbuzz libxkbcommon lua5_4
+    pam pango pipewire quickjs libsysprof-capture vulkan-headers vulkan-loader wayland
     wayland-protocols
   ];
   # vw's public headers include nlohmann/json.hpp, and vwConfig.cmake finds it.

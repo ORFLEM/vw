@@ -153,6 +153,9 @@ struct Rectangle {
 // Immutable pixel data. Scenes share it rather than copying, so rebuilding
 // a scene full of cached text and images costs no pixel copies.
 using Pixels = std::shared_ptr<const std::vector<std::uint32_t>>;
+// The same with sixteen bits a channel, for images with more than eight:
+// r | g << 16 | b << 32 | a << 48, unpremultiplied.
+using DeepPixels = std::shared_ptr<const std::vector<std::uint64_t>>;
 
 // Text that may sit between pixels (TextProps::pixel_snap = false): the
 // renderer draws it from a copy rasterized at its fractional offset.
@@ -160,13 +163,15 @@ struct ShiftedText;
 bool operator==(const ShiftedText& a, const ShiftedText& b);
 
 // Image pixels held in memory, such as a screen capture: width * height
-// values, row by row, each RGBA with red in the low byte.
+// values, row by row, each RGBA with red in the low byte. rgba16 holds them
+// with sixteen bits a channel instead, and wins when both are set.
 struct Bitmap {
   std::uint32_t width = 0;
   std::uint32_t height = 0;
   Pixels rgba;
+  DeepPixels rgba16;
 
-  bool empty() const { return width == 0 || height == 0 || !rgba; }
+  bool empty() const { return width == 0 || height == 0 || (!rgba && !rgba16); }
 };
 
 // Per-pixel colour work on an image, applied in the raster shader in this
@@ -189,6 +194,8 @@ struct Raster {
   std::uint32_t width = 0;
   std::uint32_t height = 0;
   Pixels rgba;
+  // Sixteen bits a channel; drawn instead of rgba when set.
+  DeepPixels rgba16;
   bool use_tint = true;
   bool alpha_mask = false;
   // Rounded to the nearest pixel (text); otherwise the pixel below it.
@@ -199,14 +206,15 @@ struct Raster {
   // across the drawn image. Empty for none.
   std::vector<float> mask;
 
-  std::size_t size() const { return rgba ? rgba->size() : 0; }
+  std::size_t size() const { return rgba16 ? rgba16->size() : rgba ? rgba->size() : 0; }
 
   bool operator==(const Raster& other) const {
     return carrier == other.carrier && width == other.width && height == other.height &&
            use_tint == other.use_tint && alpha_mask == other.alpha_mask &&
            pixel_snap == other.pixel_snap &&
            (shifted == other.shifted || (shifted && other.shifted && *shifted == *other.shifted)) && effect == other.effect && mask == other.mask &&
-           (rgba == other.rgba || (rgba && other.rgba && *rgba == *other.rgba));
+           (rgba == other.rgba || (rgba && other.rgba && *rgba == *other.rgba)) &&
+           (rgba16 == other.rgba16 || (rgba16 && other.rgba16 && *rgba16 == *other.rgba16));
   }
 };
 
@@ -312,6 +320,12 @@ struct ScrollArea {
 // Who draws a toplevel's titlebar and borders.
 enum class Decorations { automatic, client, server };
 
+// Bits a colour channel in the surface's buffer. bits10 leaves two bits of
+// alpha, so it suits opaque surfaces; bits16 keeps full alpha. Deeper
+// buffers need the GPU to write them and the compositor to accept them
+// (DRM formats AB30 and AB48); vw reports when either cannot.
+enum class ColorDepth : std::uint8_t { bits8, bits10, bits16 };
+
 struct Scene {
   std::vector<Rectangle> rectangles;
   std::vector<Raster> rasters;
@@ -327,6 +341,7 @@ struct Scene {
   std::int32_t exclusive_zone = 0;
   bool accepts_input = true;
   std::string surface_namespace = "vw";
+  ColorDepth color_depth = ColorDepth::bits8;
   // Layer surfaces: the output's name, or empty for the compositor's choice.
   std::string output;
   bool toplevel = false;

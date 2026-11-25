@@ -14,6 +14,14 @@ layout(push_constant) uniform Raster {
   vec4 colorize;  // colour, and where the mask starts in the pixel buffer
 } raster;
 
+// Buffer offsets arrive as the bits of a uint, not as a float value.
+uint pixel_offset() { return floatBitsToUint(raster.source_info.x); }
+
+// params.w: 0 for RGBA8, 1 for an 8-bit coverage mask, 2 for RGBA16 (two
+// words a pixel: red and green, then blue and alpha).
+bool is_alpha_mask() { return raster.params.w > 0.5 && raster.params.w < 1.5; }
+bool is_deep() { return raster.params.w > 1.5; }
+
 const vec3 luma_weights = vec3(0.2126, 0.7152, 0.0722);
 
 // Rotates around the grey axis of the RGB cube, which keeps lightness.
@@ -53,8 +61,15 @@ vec4 unpack_pixel(uint value) {
 float unpack_alpha(ivec2 coordinate) {
   ivec2 size = ivec2(raster.source_info.yz);
   uint pixel = uint(coordinate.y * size.x + coordinate.x);
-  uint packed = source.pixels[uint(raster.source_info.x) + pixel / 4u];
+  uint packed = source.pixels[pixel_offset() + pixel / 4u];
   return float((packed >> ((pixel & 3u) * 8u)) & 255u) / 255.0;
+}
+
+vec4 unpack_deep(uint index) {
+  uint at = pixel_offset() + index * 2u;
+  uint low = source.pixels[at];
+  uint high = source.pixels[at + 1u];
+  return vec4(float(low & 65535u), float(low >> 16u), float(high & 65535u), float(high >> 16u)) / 65535.0;
 }
 
 vec4 sample_pixel(vec2 coordinate) {
@@ -64,7 +79,15 @@ vec4 sample_pixel(vec2 coordinate) {
   ivec2 low = ivec2(floor(position));
   ivec2 high = min(low + 1, size - 1);
   vec2 fraction = fract(position);
-  if (raster.params.w > 0.5) {
+  if (is_deep()) {
+    uint width = uint(size.x);
+    vec4 a = unpack_deep(uint(low.y) * width + uint(low.x));
+    vec4 b = unpack_deep(uint(low.y) * width + uint(high.x));
+    vec4 c = unpack_deep(uint(high.y) * width + uint(low.x));
+    vec4 d = unpack_deep(uint(high.y) * width + uint(high.x));
+    return mix(mix(a, b, fraction.x), mix(c, d, fraction.x), fraction.y);
+  }
+  if (is_alpha_mask()) {
     float a = unpack_alpha(low);
     float b = unpack_alpha(ivec2(high.x, low.y));
     float c = unpack_alpha(ivec2(low.x, high.y));
@@ -72,7 +95,7 @@ vec4 sample_pixel(vec2 coordinate) {
     float alpha = mix(mix(a, b, fraction.x), mix(c, d, fraction.x), fraction.y);
     return vec4(1.0, 1.0, 1.0, alpha);
   }
-  uint offset = uint(raster.source_info.x);
+  uint offset = pixel_offset();
   vec4 a = unpack_pixel(source.pixels[offset + uint(low.y * size.x + low.x)]);
   vec4 b = unpack_pixel(source.pixels[offset + uint(low.y * size.x + high.x)]);
   vec4 c = unpack_pixel(source.pixels[offset + uint(high.y * size.x + low.x)]);
@@ -81,7 +104,7 @@ vec4 sample_pixel(vec2 coordinate) {
 }
 
 vec2 mask_point(uint index) {
-  uint at = uint(raster.colorize.w) + index * 2u;
+  uint at = floatBitsToUint(raster.colorize.w) + index * 2u;
   return vec2(uintBitsToFloat(source.pixels[at]), uintBitsToFloat(source.pixels[at + 1u])) * raster.bounds.zw;
 }
 
