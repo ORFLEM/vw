@@ -2,9 +2,10 @@
 
 #include "vw/icon.hpp"
 
+#include "dbus.hpp"
+#include "desktop_entry.hpp"
+
 #include <cairo.h>
-#include <gio/gdesktopappinfo.h>
-#include <gio/gio.h>
 
 #include <algorithm>
 #include <array>
@@ -35,7 +36,6 @@ namespace {
 constexpr const char* bus_name = "org.freedesktop.Notifications";
 constexpr const char* object_path = "/org/freedesktop/Notifications";
 constexpr const char* interface_xml = R"XML(
-<node><interface name="org.freedesktop.Notifications">
   <method name="GetCapabilities"><arg type="as" direction="out"/></method>
   <method name="GetServerInformation">
     <arg type="s" direction="out"/><arg type="s" direction="out"/>
@@ -51,7 +51,7 @@ constexpr const char* interface_xml = R"XML(
   <method name="CloseNotification"><arg name="id" type="u" direction="in"/></method>
   <signal name="NotificationClosed"><arg name="id" type="u"/><arg name="reason" type="u"/></signal>
   <signal name="ActionInvoked"><arg name="id" type="u"/><arg name="action_key" type="s"/></signal>
-</interface></node>)XML";
+)XML";
 
 // Spec close reasons.
 constexpr std::uint32_t expired = 1;
@@ -64,83 +64,85 @@ constexpr std::size_t history_limit = 256;
 constexpr std::size_t open_limit = 256;
 
 using Clock = std::chrono::steady_clock;
-using Variant = std::unique_ptr<GVariant, decltype(&g_variant_unref)>;
-Variant adopt(GVariant* value) { return {value, &g_variant_unref}; }
+using dbus::Message;
+using dbus::Value;
 
 // --- Hints ---------------------------------------------------------------------
 
 class Hints {
  public:
-  explicit Hints(GVariant* dictionary) : dictionary_(dictionary) {}
+  explicit Hints(const Value& dictionary) : dictionary_(dictionary) {}
 
-  Variant get(const char* key) const {
-    Variant value = adopt(g_variant_lookup_value(dictionary_, key, nullptr));
-    if (value && g_variant_is_of_type(value.get(), G_VARIANT_TYPE_VARIANT))
-      return adopt(g_variant_get_variant(value.get()));
-    return value;
-  }
+  const Value* get(const char* key) const { return dictionary_.find(key); }
   // The first of `keys` present as a string.
   std::string string(std::initializer_list<const char*> keys) const {
     for (const char* key : keys)
-      if (auto value = get(key); value && g_variant_is_of_type(value.get(), G_VARIANT_TYPE_STRING))
-        return g_variant_get_string(value.get(), nullptr);
+      if (const Value* value = get(key); value != nullptr && value->is("s")) return value->text;
     return {};
   }
   bool boolean(const char* key) const {
-    auto value = get(key);
-    return value && g_variant_is_of_type(value.get(), G_VARIANT_TYPE_BOOLEAN) && g_variant_get_boolean(value.get());
+    const Value* value = get(key);
+    return value != nullptr && value->flag();
   }
   // Senders disagree on integer types (urgency is a byte, value an int).
   std::optional<std::int64_t> integer(const char* key) const {
-    auto value = get(key);
-    if (!value) return std::nullopt;
-    GVariant* v = value.get();
-    if (g_variant_is_of_type(v, G_VARIANT_TYPE_BYTE)) return g_variant_get_byte(v);
-    if (g_variant_is_of_type(v, G_VARIANT_TYPE_INT16)) return g_variant_get_int16(v);
-    if (g_variant_is_of_type(v, G_VARIANT_TYPE_UINT16)) return g_variant_get_uint16(v);
-    if (g_variant_is_of_type(v, G_VARIANT_TYPE_INT32)) return g_variant_get_int32(v);
-    if (g_variant_is_of_type(v, G_VARIANT_TYPE_UINT32)) return g_variant_get_uint32(v);
-    if (g_variant_is_of_type(v, G_VARIANT_TYPE_INT64)) return g_variant_get_int64(v);
-    return std::nullopt;
+    const Value* value = get(key);
+    return value == nullptr ? std::nullopt : value->integer();
   }
 
  private:
-  GVariant* dictionary_;
+  const Value& dictionary_;
 };
 
 // --- Icons and images ----------------------------------------------------------
+
+std::string decode_uri_path(std::string_view uri) {
+  std::string path;
+  for (std::size_t i = 0; i < uri.size(); ++i) {
+    if (uri[i] == '%' && i + 2 < uri.size() && std::isxdigit(static_cast<unsigned char>(uri[i + 1])) != 0 &&
+        std::isxdigit(static_cast<unsigned char>(uri[i + 2])) != 0) {
+      path.push_back(static_cast<char>(std::stoi(std::string(uri.substr(i + 1, 2)), nullptr, 16)));
+      i += 2;
+    } else {
+      path.push_back(uri[i]);
+    }
+  }
+  return path;
+}
 
 // A path, a file:// URI or a theme name; empty for a missing file.
 std::string icon_source(const std::string& value) {
   std::string result = value;
   if (value.starts_with("file://")) {
-    char* path = g_filename_from_uri(value.c_str(), nullptr, nullptr);
-    result = path == nullptr ? "" : path;
-    g_free(path);
+    std::string_view rest = std::string_view(value).substr(7);
+    // file://host/path: only the local host.
+    if (!rest.starts_with("/")) {
+      const auto slash = rest.find('/');
+      rest = slash == std::string_view::npos ? std::string_view{} : rest.substr(slash);
+    }
+    result = decode_uri_path(rest);
   }
   std::error_code error;
-  if (g_path_is_absolute(result.c_str()) && !std::filesystem::exists(result, error)) return {};
+  if (result.starts_with('/') && !std::filesystem::exists(result, error)) return {};
   return result;
 }
 
 std::string desktop_icon(const std::string& entry) {
   if (entry.empty()) return {};
   const std::string id = entry.ends_with(".desktop") ? entry : entry + ".desktop";
-  GDesktopAppInfo* info = g_desktop_app_info_new(id.c_str());
-  if (info == nullptr) return {};
-  GIcon* icon = g_app_info_get_icon(G_APP_INFO(info));
-  char* text = icon == nullptr ? nullptr : g_icon_to_string(icon);
-  std::string result = text == nullptr ? "" : text;
-  g_free(text);
-  g_object_unref(info);
-  return result;
+  const auto application = applications::find(id);
+  return application ? application->icon : std::string();
 }
 
 // Only the daemon holding the bus name writes here, so anything found on
 // first use was left by an earlier run.
 const std::filesystem::path& image_directory() {
   static const std::filesystem::path directory = [] {
-    std::filesystem::path path = std::filesystem::path(g_get_user_runtime_dir()) / "vw" / "notifications";
+    const char* runtime = std::getenv("XDG_RUNTIME_DIR");
+    const std::filesystem::path base = runtime != nullptr && *runtime != '\0'
+        ? std::filesystem::path(runtime)
+        : std::filesystem::temp_directory_path() / ("vw-" + std::to_string(getuid()));
+    std::filesystem::path path = base / "vw" / "notifications";
     std::error_code error;
     std::filesystem::remove_all(path, error);
     std::filesystem::create_directories(path, error);
@@ -151,15 +153,14 @@ const std::filesystem::path& image_directory() {
 
 // Writes an image-data hint, (iiibiiay): width, height, rowstride, has alpha,
 // bits per sample, channels, pixels. The PNG's path, or empty when malformed.
-std::string write_image(GVariant* value) {
-  if (!g_variant_is_of_type(value, G_VARIANT_TYPE("(iiibiiay)"))) return {};
-  gint width = 0, height = 0, rowstride = 0, bits = 0, channels = 0;
-  gboolean has_alpha = FALSE;
-  GVariant* raw = nullptr;
-  g_variant_get(value, "(iiibii@ay)", &width, &height, &rowstride, &has_alpha, &bits, &channels, &raw);
-  Variant data = adopt(raw);
-  gsize size = 0;
-  const auto* pixels = static_cast<const std::uint8_t*>(g_variant_get_fixed_array(data.get(), &size, 1));
+std::string write_image(const Value& value) {
+  if (!value.is("(iiibiiay)")) return {};
+  const auto field = [&](std::size_t index) { return static_cast<std::int32_t>(value.items[index].bits); };
+  const int width = field(0), height = field(1), rowstride = field(2), bits = field(4), channels = field(5);
+  const bool has_alpha = value.items[3].flag();
+  const std::string& data = value.items[6].text;
+  const std::size_t size = data.size();
+  const auto* pixels = reinterpret_cast<const std::uint8_t*>(data.data());
   constexpr int limit = 4096;
   if (width <= 0 || height <= 0 || width > limit || height > limit || bits != 8 || channels != (has_alpha ? 4 : 3))
     return {};
@@ -226,21 +227,16 @@ struct Signal {
 
 class Service {
  public:
-  Service() : event_(eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK)), context_(g_main_context_new()) {
+  Service() : event_(eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK)) {
     if (event_ < 0) throw std::runtime_error("could not create notification event fd");
   }
   ~Service() {
     if (thread_.joinable()) {
       thread_.request_stop();
-      g_main_context_invoke(context_, [](gpointer data) -> gboolean {
-        auto* self = static_cast<Service*>(data);
-        if (self->loop_ != nullptr) g_main_loop_quit(self->loop_);
-        return G_SOURCE_REMOVE;
-      }, this);
+      loop_.quit();
       thread_.join();
     }
     for (const Record& record : records_) remove_file(record.owned_image);
-    g_main_context_unref(context_);
     close(event_);
   }
   Service(const Service&) = delete;
@@ -441,31 +437,28 @@ class Service {
 
   void emit(const std::vector<Signal>& signals) {
     if (signals.empty()) return;
-    GDBusConnection* connection = nullptr;
-    {
-      std::lock_guard lock(mutex_);
-      if (connection_ != nullptr) connection = G_DBUS_CONNECTION(g_object_ref(connection_));
-    }
-    if (connection == nullptr) return;
+    std::lock_guard connection_lock(connection_mutex_);
+    if (connection_ == nullptr) return;
     for (const Signal& signal : signals) {
-      GVariant* body = signal.key.empty() && std::string_view(signal.name) == "NotificationClosed"
-                           ? g_variant_new("(uu)", signal.id, signal.reason)
-                           : g_variant_new("(us)", signal.id, signal.key.c_str());
-      g_dbus_connection_emit_signal(connection, nullptr, object_path, bus_name, signal.name, body, nullptr);
+      std::vector<Value> body{Value::uint32(signal.id)};
+      if (signal.key.empty() && std::string_view(signal.name) == "NotificationClosed")
+        body.push_back(Value::uint32(signal.reason));
+      else
+        body.push_back(Value::string(signal.key));
+      connection_->emit(object_path, bus_name, signal.name, std::move(body));
     }
-    g_object_unref(connection);
   }
 
-  std::uint32_t notify(GVariant* parameters) {
-    const gchar *app = nullptr, *icon = nullptr, *summary = nullptr, *body = nullptr;
-    guint replaces = 0;
-    gint timeout = -1;
-    GVariant *actions_raw = nullptr, *hints_raw = nullptr;
-    g_variant_get(parameters, "(&su&s&s&s@as@a{sv}i)", &app, &replaces, &icon, &summary, &body, &actions_raw,
-                  &hints_raw, &timeout);
-    Variant actions = adopt(actions_raw);
-    Variant hints_value = adopt(hints_raw);
-    const Hints hints(hints_value.get());
+  std::uint32_t notify(const Message& call) {
+    if (call.signature() != "susssasa{sv}i") throw std::invalid_argument("Notify takes (susssasa{sv}i)");
+    const std::string& app = call.body[0].text;
+    const auto replaces = static_cast<std::uint32_t>(call.body[1].bits);
+    const std::string& icon = call.body[2].text;
+    const std::string& summary = call.body[3].text;
+    const std::string& body = call.body[4].text;
+    const Value& actions = call.body[5];
+    const Hints hints(call.body[6]);
+    const auto timeout = static_cast<std::int32_t>(call.body[7].bits);
 
     Record record;
     record.app_name = app;
@@ -486,19 +479,16 @@ class Service {
     if (record.icon_source.empty()) record.icon_source = desktop_icon(record.desktop_entry);
     for (const char* key : {"image-data", "image_data", "icon_data"})
       if (record.owned_image.empty())
-        if (auto data = hints.get(key)) record.owned_image = write_image(data.get());
+        if (const Value* data = hints.get(key)) record.owned_image = write_image(*data);
     record.image_source = record.owned_image.empty() ? icon_source(record.image_path) : record.owned_image;
 
-    const gsize count = g_variant_n_children(actions.get());
+    const std::size_t count = actions.size();
     if (count % 2 != 0) {
       remove_file(record.owned_image);
       throw std::invalid_argument("notification actions must be key/label pairs");
     }
-    for (gsize index = 0; index < count; index += 2) {
-      Variant key = adopt(g_variant_get_child_value(actions.get(), index));
-      Variant label = adopt(g_variant_get_child_value(actions.get(), index + 1));
-      record.actions.push_back({g_variant_get_string(key.get(), nullptr), g_variant_get_string(label.get(), nullptr)});
-    }
+    for (std::size_t index = 0; index < count; index += 2)
+      record.actions.push_back({actions.items[index].text, actions.items[index + 1].text});
 
     record.expire_timeout = timeout < 0 ? (record.urgency == 2 ? 0 : default_timeout_ms) : timeout;
     record.expires = Clock::now() + std::chrono::milliseconds(record.expire_timeout);
@@ -547,10 +537,9 @@ class Service {
 
   // One timer for the earliest deadline among open records.
   void reset_expiry() {
-    if (expiry_ != nullptr) {
-      g_source_destroy(expiry_);
-      g_source_unref(expiry_);
-      expiry_ = nullptr;
+    if (expiry_ != 0) {
+      loop_.cancel(expiry_);
+      expiry_ = 0;
     }
     auto next = Clock::time_point::max();
     {
@@ -560,26 +549,23 @@ class Service {
     }
     if (next == Clock::time_point::max()) return;
     const auto delay = std::chrono::duration_cast<std::chrono::milliseconds>(next - Clock::now()).count();
-    expiry_ = g_timeout_source_new(static_cast<guint>(std::clamp<std::int64_t>(delay + 1, 1, G_MAXUINT)));
-    g_source_set_callback(expiry_, [](gpointer data) -> gboolean {
-      auto* self = static_cast<Service*>(data);
+    expiry_ = loop_.after(std::chrono::milliseconds(std::max<std::int64_t>(delay + 1, 1)), [this] {
+      expiry_ = 0;
       std::vector<Signal> signals;
       {
-        std::lock_guard lock(self->mutex_);
+        std::lock_guard lock(mutex_);
         const auto now = Clock::now();
-        for (Record& record : self->records_)
+        for (Record& record : records_)
           if (!record.closed && record.expire_timeout > 0 && record.expires <= now)
-            self->close_locked(record, expired, signals);
+            close_locked(record, expired, signals);
         if (!signals.empty()) {
-          self->prune_locked();
-          self->changed_locked();
+          prune_locked();
+          changed_locked();
         }
       }
-      self->emit(signals);
-      self->reset_expiry();
-      return G_SOURCE_REMOVE;
-    }, this, nullptr);
-    g_source_attach(expiry_, context_);
+      emit(signals);
+      reset_expiry();
+    });
   }
 
   void close_by_sender(std::uint32_t id) {
@@ -595,123 +581,78 @@ class Service {
     emit(signals);
   }
 
-  static void method_call(GDBusConnection*, const gchar*, const gchar*, const gchar*, const gchar* method,
-                          GVariant* parameters, GDBusMethodInvocation* invocation, gpointer data) {
-    auto* self = static_cast<Service*>(data);
-    const std::string_view name(method);
-    try {
-      if (name == "GetCapabilities") {
-        const char* capabilities[] = {"actions", "body", "body-markup", "icon-static", "persistence", nullptr};
-        g_dbus_method_invocation_return_value(invocation, g_variant_new("(^as)", capabilities));
-      } else if (name == "GetServerInformation") {
-        g_dbus_method_invocation_return_value(invocation, g_variant_new("(ssss)", "vw", "vw", VW_VERSION, "1.2"));
-      } else if (name == "Notify") {
-        g_dbus_method_invocation_return_value(invocation, g_variant_new("(u)", self->notify(parameters)));
-      } else if (name == "CloseNotification") {
-        guint id = 0;
-        g_variant_get(parameters, "(u)", &id);
-        self->close_by_sender(id);
-        g_dbus_method_invocation_return_value(invocation, g_variant_new("()"));
-      } else {
-        g_dbus_method_invocation_return_dbus_error(invocation, "org.freedesktop.DBus.Error.UnknownMethod",
-                                                   "unknown notification method");
-      }
-    } catch (const std::exception& error) {
-      g_dbus_method_invocation_return_dbus_error(invocation, "org.freedesktop.DBus.Error.InvalidArgs", error.what());
+  dbus::Reply method_call(const Message& call) {
+    const std::string_view name(call.member);
+    if (name == "GetCapabilities")
+      return {{Value::strings({"actions", "body", "body-markup", "icon-static", "persistence"})}, {}, {}};
+    if (name == "GetServerInformation")
+      return {{Value::string("vw"), Value::string("vw"), Value::string(VW_VERSION), Value::string("1.2")}, {}, {}};
+    if (name == "Notify") return {{Value::uint32(notify(call))}, {}, {}};
+    if (name == "CloseNotification") {
+      const Value* id = call.arg(0);
+      if (id == nullptr || !id->is("u")) throw std::invalid_argument("CloseNotification takes (u)");
+      close_by_sender(static_cast<std::uint32_t>(id->bits));
+      return {};
     }
-  }
-
-  static void connection_closed(GDBusConnection*, gboolean, GError* error, gpointer data) {
-    auto* self = static_cast<Service*>(data);
-    {
-      std::lock_guard lock(self->mutex_);
-      self->running_ = false;
-      self->error_ = error == nullptr ? "notification D-Bus connection closed" : error->message;
-      self->changed_locked();
-    }
-    if (self->loop_ != nullptr) g_main_loop_quit(self->loop_);
-  }
-
-  static std::string take_error(GError* error, const char* fallback) {
-    const std::string message = error == nullptr ? fallback : error->message;
-    if (error != nullptr) g_error_free(error);
-    return message;
+    return dbus::Reply::error("org.freedesktop.DBus.Error.UnknownMethod", "unknown notification method");
   }
 
   // A private connection, so closing it drops the name with nothing else.
   void run(const std::stop_token& stop) {
-    g_main_context_push_thread_default(context_);
-    loop_ = g_main_loop_new(context_, FALSE);
-    GDBusConnection* connection = nullptr;
-    GDBusNodeInfo* info = nullptr;
-    guint registration = 0;
-    gulong closed_handler = 0;
     bool owned = false;
+    std::unique_ptr<dbus::Connection> connection;
     try {
-      GError* error = nullptr;
-      gchar* address = g_dbus_address_get_for_bus_sync(G_BUS_TYPE_SESSION, nullptr, &error);
-      if (address == nullptr) throw std::runtime_error(take_error(error, "session D-Bus is unavailable"));
-      connection = g_dbus_connection_new_for_address_sync(
-          address,
-          static_cast<GDBusConnectionFlags>(G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT |
-                                            G_DBUS_CONNECTION_FLAGS_MESSAGE_BUS_CONNECTION),
-          nullptr, nullptr, &error);
-      g_free(address);
-      if (connection == nullptr) throw std::runtime_error(take_error(error, "could not connect to session D-Bus"));
-      g_dbus_connection_set_exit_on_close(connection, FALSE);
-      info = g_dbus_node_info_new_for_xml(interface_xml, nullptr);
-      const GDBusInterfaceVTable vtable{method_call, nullptr, nullptr, {nullptr}};
-      registration = g_dbus_connection_register_object(connection, object_path, info->interfaces[0], &vtable, this,
-                                                       nullptr, &error);
-      if (registration == 0) throw std::runtime_error(take_error(error, "could not export notification object"));
+      connection = std::make_unique<dbus::Connection>(dbus::Bus::session, loop_);
+      connection->export_object(object_path, {bus_name, interface_xml,
+                                              [this](const Message& call) { return method_call(call); }, {}});
       // DO_NOT_QUEUE: fail at once when another daemon has the name.
-      Variant reply = adopt(g_dbus_connection_call_sync(
-          connection, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "RequestName",
-          g_variant_new("(su)", bus_name, 4U), G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, 2000, nullptr, &error));
-      if (!reply) throw std::runtime_error(take_error(error, "could not acquire notification name"));
-      guint result = 0;
-      g_variant_get(reply.get(), "(u)", &result);
+      const std::uint32_t result = connection->request_name(bus_name, 4U);
+      if (result == 0) throw std::runtime_error("could not acquire notification name");
       if (result != 1 && result != 4)
         throw std::runtime_error("another notification daemon already owns org.freedesktop.Notifications");
       owned = true;
-      closed_handler = g_signal_connect(connection, "closed", G_CALLBACK(connection_closed), this);
+      connection->on_closed([this] {
+        {
+          std::lock_guard lock(mutex_);
+          running_ = false;
+          error_ = "notification D-Bus connection closed";
+          changed_locked();
+        }
+        loop_.quit();
+      });
+      {
+        std::lock_guard connection_lock(connection_mutex_);
+        connection_ = connection.get();
+      }
       {
         std::lock_guard lock(mutex_);
-        connection_ = connection;
         running_ = true;
         ready_ = true;
         changed_locked();
       }
       ready_condition_.notify_all();
-      if (!stop.stop_requested()) g_main_loop_run(loop_);
+      if (!stop.stop_requested()) loop_.run();
     } catch (const std::exception& error) {
       std::lock_guard lock(mutex_);
       error_ = error.what();
     }
-    if (expiry_ != nullptr) {
-      g_source_destroy(expiry_);
-      g_source_unref(expiry_);
-      expiry_ = nullptr;
+    if (expiry_ != 0) {
+      loop_.cancel(expiry_);
+      expiry_ = 0;
+    }
+    {
+      std::lock_guard connection_lock(connection_mutex_);
+      connection_ = nullptr;
     }
     {
       std::lock_guard lock(mutex_);
-      connection_ = nullptr;
       running_ = false;
     }
     if (connection != nullptr) {
-      if (closed_handler != 0) g_signal_handler_disconnect(connection, closed_handler);
-      if (owned)
-        Variant released = adopt(g_dbus_connection_call_sync(
-            connection, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "ReleaseName",
-            g_variant_new("(s)", bus_name), nullptr, G_DBUS_CALL_FLAGS_NONE, 1000, nullptr, nullptr));
-      if (registration != 0) g_dbus_connection_unregister_object(connection, registration);
-      (void)g_dbus_connection_close_sync(connection, nullptr, nullptr);
-      g_object_unref(connection);
+      if (owned && connection->connected()) connection->release_name(bus_name);
+      connection->unexport_object(object_path);
+      connection.reset();
     }
-    if (info != nullptr) g_dbus_node_info_unref(info);
-    g_main_loop_unref(loop_);
-    loop_ = nullptr;
-    g_main_context_pop_thread_default(context_);
     {
       std::lock_guard lock(mutex_);
       ready_ = true;
@@ -721,14 +662,14 @@ class Service {
   }
 
   const int event_;
-  GMainContext* const context_;
-  GMainLoop* loop_ = nullptr;
-  GSource* expiry_ = nullptr;  // D-Bus thread only
+  dbus::Loop loop_;
+  std::uint64_t expiry_ = 0;  // D-Bus thread only
   std::jthread thread_;
 
   std::mutex mutex_;
   std::condition_variable ready_condition_;
-  GDBusConnection* connection_ = nullptr;
+  std::mutex connection_mutex_;
+  dbus::Connection* connection_ = nullptr;
   std::vector<Record> records_;  // oldest first
   std::uint32_t next_id_ = 1;
   std::uint64_t generation_ = 0;

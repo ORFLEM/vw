@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <map>
+#include <set>
 #include <optional>
 #include <span>
 #include <string>
@@ -126,6 +127,8 @@ class WaylandWidget {
   std::unique_ptr<zwayland::client::Display> display_;
   zwayland::client::Proxy* compositor_ = nullptr;
   zwayland::client::Proxy* dmabuf_ = nullptr;
+  // DRM formats the compositor accepts through linux-dmabuf.
+  std::set<std::uint32_t> dmabuf_formats_;
   zwayland::client::Proxy* focus_grab_manager_ = nullptr;
   // wp_cursor_shape: the manager, this pointer's device, the serial of the
   // last pointer enter, and the shape last set (0 none yet).

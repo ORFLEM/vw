@@ -42,32 +42,45 @@ Kind kind_of(const std::string& type) {
   return Kind::other;
 }
 
-std::vector<std::string> object_paths(const dbus::Variant& reply) {
-  std::vector<std::string> paths;
-  if (!reply) return paths;
-  GVariantIter* iter = nullptr;
-  const gchar* path = nullptr;
-  g_variant_get(reply.get(), "(ao)", &iter);
-  while (g_variant_iter_next(iter, "&o", &path)) paths.emplace_back(path);
-  g_variant_iter_free(iter);
-  return paths;
+using dbus::Message;
+using dbus::Value;
+
+std::optional<Value> call(dbus::Connection* bus, const std::string& path, const char* interface,
+                          const char* method, std::vector<Value> arguments = {}, int timeout_ms = 1000) {
+  if (bus == nullptr) return std::nullopt;
+  return bus->call_value(Message::method_call(nm_name, path, interface, method, std::move(arguments)), timeout_ms);
+}
+
+// Whether a call succeeded, for methods without a reply value.
+bool invoke(dbus::Connection* bus, const std::string& path, const char* interface, const char* method,
+            std::vector<Value> arguments = {}, int timeout_ms = 1000) {
+  return bus != nullptr &&
+         bus->call(Message::method_call(nm_name, path, interface, method, std::move(arguments)), timeout_ms)
+             .has_value();
+}
+
+std::optional<Value> get_all(dbus::Connection* bus, const std::string& path, const char* interface) {
+  return call(bus, path, "org.freedesktop.DBus.Properties", "GetAll", {Value::string(interface)});
+}
+
+std::string trimmed_bytes(std::string_view bytes) {
+  std::string result(bytes);
+  while (!result.empty() && result.back() == '\0') result.pop_back();
+  return result;
 }
 
 // SSID → settings object of every saved Wi-Fi connection.
-std::unordered_map<std::string, std::string> saved_connections(GDBusConnection* bus) {
+std::unordered_map<std::string, std::string> saved_connections(dbus::Connection* bus) {
   std::unordered_map<std::string, std::string> saved;
-  const auto paths = object_paths(dbus::call(bus, nm_name, settings_path, settings_interface,
-                                             "ListConnections", nullptr, "(ao)"));
-  for (const auto& path : paths) {
-    auto reply = dbus::call(bus, nm_name, path.c_str(), connection_interface, "GetSettings",
-                            nullptr, "(a{sa{sv}})");
-    if (!reply) continue;
-    auto settings = dbus::adopt(g_variant_get_child_value(reply.get(), 0));
-    auto wireless = dbus::adopt(
-        g_variant_lookup_value(settings.get(), "802-11-wireless", G_VARIANT_TYPE("a{sv}")));
-    if (!wireless) continue;
-    const std::string ssid = dbus::bytes_of(dbus::lookup(wireless.get(), "ssid").get());
-    if (!ssid.empty()) saved.emplace(ssid, path);
+  const auto paths = call(bus, settings_path, settings_interface, "ListConnections");
+  if (!paths) return saved;
+  for (const auto& path : paths->string_list()) {
+    const auto settings = call(bus, path, connection_interface, "GetSettings");
+    const Value* wireless = settings ? settings->find("802-11-wireless") : nullptr;
+    if (wireless == nullptr) continue;
+    const Value* ssid = wireless->find("ssid");
+    const std::string name = ssid == nullptr ? std::string() : trimmed_bytes(ssid->str());
+    if (!name.empty()) saved.emplace(name, path);
   }
   return saved;
 }
@@ -75,7 +88,7 @@ std::unordered_map<std::string, std::string> saved_connections(GDBusConnection* 
 class Service {
  public:
   Service()
-      : monitor_(G_BUS_TYPE_SYSTEM, [this](GDBusConnection* bus) { refresh(bus); }, {}, 150) {
+      : monitor_(dbus::Bus::system, [this](dbus::Connection* bus) { refresh(bus); }, {}, 150) {
     monitor_.watch(nm_name);
   }
 
@@ -90,67 +103,69 @@ class Service {
   }
 
  private:
-  void refresh(GDBusConnection* bus) {
+  void refresh(dbus::Connection* bus) {
     Snapshot next;
     Status& status = next.status;
-    auto manager = dbus::get_all(bus, nm_name, nm_path, nm_name);
-    status.available = static_cast<bool>(manager);
+    const auto manager_value = get_all(bus, nm_path, nm_name);
+    const Value* manager = manager_value ? &*manager_value : nullptr;
+    status.available = manager != nullptr;
     if (!status.available) {
       std::lock_guard lock(mutex_);
       snapshot_ = std::move(next);
       return;
     }
-    status.networking_enabled = dbus::get_bool(manager.get(), "NetworkingEnabled");
-    status.wifi_enabled = dbus::get_bool(manager.get(), "WirelessEnabled");
-    status.wifi_hardware_enabled = dbus::get_bool(manager.get(), "WirelessHardwareEnabled");
-    status.connectivity = static_cast<Connectivity>(dbus::get_int(manager.get(), "Connectivity"));
-    status.primary = kind_of(dbus::get_string(manager.get(), "PrimaryConnectionType"));
+    status.networking_enabled = dbus::get_bool(manager, "NetworkingEnabled");
+    status.wifi_enabled = dbus::get_bool(manager, "WirelessEnabled");
+    status.wifi_hardware_enabled = dbus::get_bool(manager, "WirelessHardwareEnabled");
+    status.connectivity = static_cast<Connectivity>(dbus::get_int(manager, "Connectivity"));
+    status.primary = kind_of(dbus::get_string(manager, "PrimaryConnectionType"));
 
-    const std::string primary = dbus::get_string(manager.get(), "PrimaryConnection");
+    const std::string primary = dbus::get_string(manager, "PrimaryConnection");
     if (primary.size() > 1) {
-      auto active = dbus::get_all(bus, nm_name, primary.c_str(), active_interface);
-      status.connection = dbus::get_string(active.get(), "Id");
-      const std::string ip4 = dbus::get_string(active.get(), "Ip4Config");
+      const auto active = get_all(bus, primary, active_interface);
+      status.connection = dbus::get_string(active ? &*active : nullptr, "Id");
+      const std::string ip4 = dbus::get_string(active ? &*active : nullptr, "Ip4Config");
       if (ip4.size() > 1) {
-        auto config = dbus::get_all(bus, nm_name, ip4.c_str(),
-                                    "org.freedesktop.NetworkManager.IP4Config");
-        auto addresses = dbus::lookup(config.get(), "AddressData");
-        if (addresses && g_variant_is_of_type(addresses.get(), G_VARIANT_TYPE("aa{sv}")) &&
-            g_variant_n_children(addresses.get()) > 0) {
-          auto first = dbus::adopt(g_variant_get_child_value(addresses.get(), 0));
-          status.address = dbus::get_string(first.get(), "address");
-          if (const auto prefix = dbus::get_int(first.get(), "prefix", -1); prefix >= 0)
+        const auto config = get_all(bus, ip4, "org.freedesktop.NetworkManager.IP4Config");
+        const Value* addresses = config ? config->find("AddressData") : nullptr;
+        if (addresses != nullptr && addresses->is("aa{sv}") && addresses->size() > 0) {
+          const Value* first = addresses->at(0);
+          status.address = dbus::get_string(first, "address");
+          if (const auto prefix = dbus::get_int(first, "prefix", -1); prefix >= 0)
             status.address += "/" + std::to_string(prefix);
         }
       }
     }
 
     std::string active_ap;
-    for (const auto& path : object_paths(dbus::call(bus, nm_name, nm_path, nm_name, "GetDevices",
-                                                    nullptr, "(ao)"))) {
-      auto device = dbus::get_all(bus, nm_name, path.c_str(), device_interface);
-      const auto type = dbus::get_int(device.get(), "DeviceType");
-      const auto state = dbus::get_int(device.get(), "State");
+    const auto devices = call(bus, nm_path, nm_name, "GetDevices");
+    for (const auto& path : devices ? devices->string_list() : std::vector<std::string>{}) {
+      const auto device_value = get_all(bus, path, device_interface);
+      const Value* device = device_value ? &*device_value : nullptr;
+      const auto type = dbus::get_int(device, "DeviceType");
+      const auto state = dbus::get_int(device, "State");
       if (type == device_ethernet && state == device_activated) status.wired = true;
       if (type != device_wifi || !next.wifi_device.empty()) continue;
       status.has_wifi = true;
       next.wifi_device = path;
-      const std::string active = dbus::get_string(device.get(), "ActiveConnection");
+      const std::string active = dbus::get_string(device, "ActiveConnection");
       if (active.size() > 1) next.wifi_active_connection = active;
-      auto wireless = dbus::get_all(bus, nm_name, path.c_str(), wireless_interface);
-      active_ap = dbus::get_string(wireless.get(), "ActiveAccessPoint");
-      for (const auto& ap_path : dbus::get_strings(wireless.get(), "AccessPoints")) {
-        auto ap = dbus::get_all(bus, nm_name, ap_path.c_str(), ap_interface);
-        if (!ap) continue;
+      const auto wireless_value = get_all(bus, path, wireless_interface);
+      const Value* wireless = wireless_value ? &*wireless_value : nullptr;
+      active_ap = dbus::get_string(wireless, "ActiveAccessPoint");
+      for (const auto& ap_path : dbus::get_strings(wireless, "AccessPoints")) {
+        const auto ap_value = get_all(bus, ap_path, ap_interface);
+        if (!ap_value) continue;
+        const Value* ap = &*ap_value;
         AccessPoint point;
-        point.ssid = dbus::bytes_of(dbus::lookup(ap.get(), "Ssid").get());
+        const Value* ssid = ap->find("Ssid");
+        point.ssid = ssid == nullptr ? std::string() : trimmed_bytes(ssid->str());
         if (point.ssid.empty()) continue;
-        point.bssid = dbus::get_string(ap.get(), "HwAddress");
-        point.strength = static_cast<std::uint8_t>(dbus::get_int(ap.get(), "Strength"));
-        point.frequency = static_cast<std::uint32_t>(dbus::get_int(ap.get(), "Frequency"));
-        point.secured = (dbus::get_int(ap.get(), "Flags") & 1) != 0 ||
-                        dbus::get_int(ap.get(), "WpaFlags") != 0 ||
-                        dbus::get_int(ap.get(), "RsnFlags") != 0;
+        point.bssid = dbus::get_string(ap, "HwAddress");
+        point.strength = static_cast<std::uint8_t>(dbus::get_int(ap, "Strength"));
+        point.frequency = static_cast<std::uint32_t>(dbus::get_int(ap, "Frequency"));
+        point.secured = (dbus::get_int(ap, "Flags") & 1) != 0 || dbus::get_int(ap, "WpaFlags") != 0 ||
+                        dbus::get_int(ap, "RsnFlags") != 0;
         point.active = ap_path == active_ap;
         // Keep the strongest AP per SSID, but always the active one.
         auto existing = std::ranges::find(next.access_points, point.ssid, &AccessPoint::ssid);
@@ -190,7 +205,7 @@ Service& service() {
   return instance;
 }
 
-GDBusConnection* bus() { return service().monitor().connection(); }
+dbus::Connection* bus() { return service().monitor().connection(); }
 
 bool done(bool ok) {
   if (ok) service().monitor().schedule_refresh();
@@ -223,18 +238,15 @@ std::string icon_name(const Status& status) {
 }
 
 bool set_wifi_enabled(bool enabled) {
-  return done(dbus::set_property(bus(), nm_name, nm_path, nm_name, "WirelessEnabled",
-                                 g_variant_new_boolean(enabled ? TRUE : FALSE)));
+  return done(invoke(bus(), nm_path, "org.freedesktop.DBus.Properties", "Set",
+                     {Value::string(nm_name), Value::string("WirelessEnabled"),
+                      Value::variant(Value::boolean(enabled))}));
 }
 
 bool scan() {
   const Snapshot snapshot = service().snapshot();
   if (snapshot.wifi_device.empty()) return false;
-  GVariantBuilder options;
-  g_variant_builder_init(&options, G_VARIANT_TYPE("a{sv}"));
-  return static_cast<bool>(dbus::call(bus(), nm_name, snapshot.wifi_device.c_str(),
-                                      wireless_interface, "RequestScan",
-                                      g_variant_new("(a{sv})", &options)));
+  return invoke(bus(), snapshot.wifi_device, wireless_interface, "RequestScan", {Value::dict("s", "v")});
 }
 
 bool connect(std::string_view ssid_view, std::string_view password) {
@@ -244,40 +256,30 @@ bool connect(std::string_view ssid_view, std::string_view password) {
   const auto ap = snapshot.ap_paths.find(ssid);
   const std::string specific = ap != snapshot.ap_paths.end() ? ap->second : "/";
   if (const auto saved = snapshot.saved.find(ssid); saved != snapshot.saved.end() && password.empty())
-    return done(static_cast<bool>(dbus::call(
-        bus(), nm_name, nm_path, nm_name, "ActivateConnection",
-        g_variant_new("(ooo)", saved->second.c_str(), snapshot.wifi_device.c_str(),
-                      specific.c_str()),
-        "(o)", 10000)));
+    return done(invoke(bus(), nm_path, nm_name, "ActivateConnection",
+                       {Value::object_path(saved->second), Value::object_path(snapshot.wifi_device),
+                        Value::object_path(specific)},
+                       10000));
 
-  GVariantBuilder settings;
-  g_variant_builder_init(&settings, G_VARIANT_TYPE("a{sa{sv}}"));
-  GVariantBuilder wireless;
-  g_variant_builder_init(&wireless, G_VARIANT_TYPE("a{sv}"));
-  g_variant_builder_add(&wireless, "{sv}", "ssid",
-                        g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, ssid.data(), ssid.size(), 1));
-  g_variant_builder_add(&settings, "{sa{sv}}", "802-11-wireless", &wireless);
-  if (!password.empty()) {
-    const std::string psk(password);
-    GVariantBuilder security;
-    g_variant_builder_init(&security, G_VARIANT_TYPE("a{sv}"));
-    g_variant_builder_add(&security, "{sv}", "key-mgmt", g_variant_new_string("wpa-psk"));
-    g_variant_builder_add(&security, "{sv}", "psk", g_variant_new_string(psk.c_str()));
-    g_variant_builder_add(&settings, "{sa{sv}}", "802-11-wireless-security", &security);
-  }
-  return done(static_cast<bool>(dbus::call(
-      bus(), nm_name, nm_path, nm_name, "AddAndActivateConnection",
-      g_variant_new("(a{sa{sv}}oo)", &settings, snapshot.wifi_device.c_str(), specific.c_str()),
-      "(oo)", 10000)));
+  std::vector<std::pair<Value, Value>> settings;
+  settings.emplace_back(Value::string("802-11-wireless"),
+                        Value::dict("s", "v", {{Value::string("ssid"), Value::variant(Value::bytes(ssid))}}));
+  if (!password.empty())
+    settings.emplace_back(Value::string("802-11-wireless-security"),
+                          Value::dict("s", "v",
+                                      {{Value::string("key-mgmt"), Value::variant(Value::string("wpa-psk"))},
+                                       {Value::string("psk"), Value::variant(Value::string(password))}}));
+  return done(invoke(bus(), nm_path, nm_name, "AddAndActivateConnection",
+                     {Value::dict("s", "a{sv}", std::move(settings)), Value::object_path(snapshot.wifi_device),
+                      Value::object_path(specific)},
+                     10000));
 }
 
 bool disconnect_wifi() {
   const Snapshot snapshot = service().snapshot();
   if (snapshot.wifi_active_connection.empty()) return false;
-  return done(static_cast<bool>(dbus::call(bus(), nm_name, nm_path, nm_name,
-                                           "DeactivateConnection",
-                                           g_variant_new("(o)",
-                                                         snapshot.wifi_active_connection.c_str()))));
+  return done(invoke(bus(), nm_path, nm_name, "DeactivateConnection",
+                     {Value::object_path(snapshot.wifi_active_connection)}));
 }
 
 int event_fd() { return service().monitor().fd(); }

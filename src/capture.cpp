@@ -391,7 +391,7 @@ class Capturer {
       for (std::uint32_t x = 0; x < frame.width; ++x) target[x] = to_rgba(source[x], frame.format);
     }
     return {frame.width, frame.height,
-            std::make_shared<const std::vector<std::uint32_t>>(std::move(pixels))};
+            std::make_shared<const std::vector<std::uint32_t>>(std::move(pixels)), {}};
   }
 
   void add_output(Proxy& registry, std::uint32_t name, std::uint32_t version) {

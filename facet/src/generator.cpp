@@ -17,7 +17,7 @@ namespace {
 
 enum class Type {
   number, integer, size, boolean, string, strings, color, handler, input, padding,
-  anchor, layer, justify, align, weight, fit, text_align, gradient,
+  anchor, layer, justify, align, weight, fit, text_align, gradient, color_depth,
 };
 
 struct Property {
@@ -52,7 +52,7 @@ const std::vector<Element>& elements() {
        {{"width", "width", number}, {"height", "height", number}, {"anchor", "anchor", Type::anchor},
         {"layer", "layer", Type::layer}, {"exclusive_zone", "exclusive_zone", integer},
         {"namespace", "surface_namespace", string}, {"refresh", "refresh_interval", number},
-        {"output", "output", string}}, "", ""},
+        {"output", "output", string}, {"color_depth", "color_depth", Type::color_depth}}, "", ""},
       {"vw.ui", "Rectangle", Kind::rectangle, "vw::RectangleProps",
        {{"width", "width", number}, {"height", "height", number}, {"radius", "radius", number},
         {"color", "color", color}, {"bg", "color", color}, {"color2", "color2", color},
@@ -130,6 +130,8 @@ const std::map<std::string, std::string>& choices(Type type) {
       {Type::text_align, {{"start", "\"start\""}, {"center", "\"center\""}, {"end", "\"end\""}}},
       {Type::gradient, {{"none", "vw::Gradient::none"}, {"horizontal", "vw::Gradient::horizontal"},
                         {"vertical", "vw::Gradient::vertical"}}},
+      {Type::color_depth, {{"bits8", "vw::ColorDepth::bits8"}, {"bits10", "vw::ColorDepth::bits10"},
+                           {"bits16", "vw::ColorDepth::bits16"}}},
   };
   return table.at(type);
 }

@@ -5,7 +5,7 @@
 #include <string_view>
 #include <vector>
 
-// Installed desktop applications (GIO desktop entries).
+// Installed desktop applications (freedesktop desktop entries).
 namespace vw::applications {
 
 struct Application {
@@ -18,7 +18,8 @@ struct Application {
   std::string commandline;
   std::string filename;
   std::string startup_wm_class;
-  // Serialized GIcon, and the themed 48px file it resolves to.
+  // The entry's Icon (a theme name or an absolute path), and the themed
+  // 48px file it resolves to.
   std::string icon;
   std::string icon_path;
   bool terminal = false;

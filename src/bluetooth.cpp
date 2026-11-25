@@ -13,6 +13,22 @@ namespace {
 constexpr const char* bluez = "org.bluez";
 constexpr const char* adapter_interface = "org.bluez.Adapter1";
 constexpr const char* device_interface = "org.bluez.Device1";
+constexpr const char* properties_interface = "org.freedesktop.DBus.Properties";
+
+using dbus::Message;
+using dbus::Value;
+
+bool invoke(dbus::Connection* bus, const std::string& path, const char* interface, const char* method,
+            std::vector<Value> arguments = {}) {
+  return bus != nullptr &&
+         bus->call(Message::method_call(bluez, path, interface, method, std::move(arguments))).has_value();
+}
+
+bool set_property(dbus::Connection* bus, const std::string& path, const char* interface, const char* property,
+                  Value value) {
+  return invoke(bus, path, properties_interface, "Set",
+                {Value::string(interface), Value::string(property), Value::variant(std::move(value))});
+}
 
 struct Snapshot {
   bool available = false;
@@ -22,7 +38,7 @@ struct Snapshot {
 
 class Service {
  public:
-  Service() : monitor_(G_BUS_TYPE_SYSTEM, [this](GDBusConnection* bus) { refresh(bus); }) {
+  Service() : monitor_(dbus::Bus::system, [this](dbus::Connection* bus) { refresh(bus); }) {
     monitor_.watch(bluez);
   }
 
@@ -45,98 +61,74 @@ class Service {
   // Calls a Device1 method asynchronously on the monitor thread. then, when
   // set, runs there after success.
   void device_call(const std::string& path, const char* method,
-                   std::function<void(GDBusConnection*)> then = {}) {
+                   std::function<void(dbus::Connection*)> then = {}) {
     {
       std::lock_guard lock(mutex_);
       busy_.insert(path);
       error_.clear();
     }
     monitor_.wake();
-    struct Pending {
-      Service* self;
-      std::string path;
-      std::function<void(GDBusConnection*)> then;
-    };
     monitor_.invoke([this, path, method, then = std::move(then)]() mutable {
-      g_dbus_connection_call(
-          monitor_.connection(), bluez, path.c_str(), device_interface, method, nullptr, nullptr,
-          G_DBUS_CALL_FLAGS_NONE, 60000, nullptr,
-          [](GObject* source, GAsyncResult* result, gpointer data) {
-            std::unique_ptr<Pending> pending(static_cast<Pending*>(data));
-            GError* error = nullptr;
-            GVariant* reply = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), result,
-                                                            &error);
-            if (reply != nullptr) g_variant_unref(reply);
-            Service& self = *pending->self;
-            {
-              std::lock_guard lock(self.mutex_);
-              self.busy_.erase(pending->path);
-              if (error != nullptr) {
-                char* remote = g_dbus_error_get_remote_error(error);
-                g_dbus_error_strip_remote_error(error);
-                self.error_ = error->message;
-                g_free(remote);
-              }
-            }
-            if (error != nullptr) g_error_free(error);
-            else if (pending->then) pending->then(G_DBUS_CONNECTION(source));
-            self.monitor_.schedule_refresh();
-            self.monitor_.wake();
-          },
-          new Pending{this, path, std::move(then)});
+      dbus::Connection* bus = monitor_.connection();
+      bus->call_async(Message::method_call(bluez, path, device_interface, method), 60000,
+                      [this, bus, path, then = std::move(then)](const Message* reply, const std::string& error) {
+                        {
+                          std::lock_guard lock(mutex_);
+                          busy_.erase(path);
+                          // BlueZ errors read "org.bluez.Error.X: message"; keep the message.
+                          if (reply == nullptr) {
+                            const auto colon = error.find(": ");
+                            error_ = colon == std::string::npos ? error : error.substr(colon + 2);
+                          }
+                        }
+                        if (reply != nullptr && then) then(bus);
+                        monitor_.schedule_refresh();
+                        monitor_.wake();
+                      });
     });
   }
 
  private:
-  void refresh(GDBusConnection* bus) {
+  void refresh(dbus::Connection* bus) {
     Snapshot next;
-    auto reply = dbus::call(bus, bluez, "/", "org.freedesktop.DBus.ObjectManager",
-                            "GetManagedObjects", nullptr, "(a{oa{sa{sv}}})");
-    next.available = static_cast<bool>(reply);
-    if (reply) {
-      auto objects = dbus::adopt(g_variant_get_child_value(reply.get(), 0));
-      GVariantIter iter;
-      g_variant_iter_init(&iter, objects.get());
-      const gchar* path = nullptr;
-      GVariant* interfaces = nullptr;
-      while (g_variant_iter_next(&iter, "{&o@a{sa{sv}}}", &path, &interfaces)) {
-        auto owned = dbus::adopt(interfaces);
-        auto adapter = dbus::adopt(
-            g_variant_lookup_value(interfaces, adapter_interface, G_VARIANT_TYPE("a{sv}")));
-        if (adapter) {
+    const auto objects = bus->call_value(
+        Message::method_call(bluez, "/", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects"));
+    next.available = objects && objects->is("a{oa{sa{sv}}}");
+    if (next.available) {
+      for (const Value& object : objects->items) {
+        const std::string path = object.items[0].text;
+        const Value& interfaces = object.items[1];
+        if (const Value* adapter = interfaces.find(adapter_interface)) {
           next.adapters.push_back({
               .path = path,
-              .name = dbus::get_string(adapter.get(), "Alias"),
-              .address = dbus::get_string(adapter.get(), "Address"),
-              .powered = dbus::get_bool(adapter.get(), "Powered"),
-              .discovering = dbus::get_bool(adapter.get(), "Discovering"),
-              .discoverable = dbus::get_bool(adapter.get(), "Discoverable"),
+              .name = dbus::get_string(adapter, "Alias"),
+              .address = dbus::get_string(adapter, "Address"),
+              .powered = dbus::get_bool(adapter, "Powered"),
+              .discovering = dbus::get_bool(adapter, "Discovering"),
+              .discoverable = dbus::get_bool(adapter, "Discoverable"),
           });
         }
-        auto device = dbus::adopt(
-            g_variant_lookup_value(interfaces, device_interface, G_VARIANT_TYPE("a{sv}")));
-        if (!device) continue;
+        const Value* device = interfaces.find(device_interface);
+        if (device == nullptr) continue;
         Device entry{
             .path = path,
-            .adapter = dbus::get_string(device.get(), "Adapter"),
-            .name = dbus::get_string(device.get(), "Name"),
-            .address = dbus::get_string(device.get(), "Address"),
-            .icon = dbus::get_string(device.get(), "Icon"),
-            .paired = dbus::get_bool(device.get(), "Paired"),
-            .trusted = dbus::get_bool(device.get(), "Trusted"),
-            .connected = dbus::get_bool(device.get(), "Connected"),
+            .adapter = dbus::get_string(device, "Adapter"),
+            .name = dbus::get_string(device, "Name"),
+            .address = dbus::get_string(device, "Address"),
+            .icon = dbus::get_string(device, "Icon"),
+            .paired = dbus::get_bool(device, "Paired"),
+            .trusted = dbus::get_bool(device, "Trusted"),
+            .connected = dbus::get_bool(device, "Connected"),
             .busy = false,
             .battery = std::nullopt,
         };
         // Alias falls back to the address for unnamed devices; keep those
         // only once paired.
-        const std::string alias = dbus::get_string(device.get(), "Alias");
+        const std::string alias = dbus::get_string(device, "Alias");
         if (entry.name.empty() && !entry.paired) continue;
         if (!alias.empty()) entry.name = alias;
-        auto battery = dbus::adopt(
-            g_variant_lookup_value(interfaces, "org.bluez.Battery1", G_VARIANT_TYPE("a{sv}")));
-        if (battery) {
-          const auto percentage = dbus::get_int(battery.get(), "Percentage", -1);
+        if (const Value* battery = interfaces.find("org.bluez.Battery1")) {
+          const auto percentage = dbus::get_int(battery, "Percentage", -1);
           if (percentage >= 0) entry.battery = static_cast<std::uint8_t>(percentage);
         }
         next.devices.push_back(std::move(entry));
@@ -172,8 +164,7 @@ bool known(const std::string& path) {
 bool adapter_call(const char* method) {
   const auto first = adapter();
   if (!first) return false;
-  const bool ok = static_cast<bool>(dbus::call(service().monitor().connection(), bluez,
-                                               first->path.c_str(), adapter_interface, method));
+  const bool ok = invoke(service().monitor().connection(), first->path, adapter_interface, method);
   if (ok) service().monitor().schedule_refresh();
   return ok;
 }
@@ -194,9 +185,8 @@ std::vector<Device> devices() { return service().snapshot().devices; }
 bool set_powered(bool powered) {
   const auto first = adapter();
   if (!first) return false;
-  const bool ok = dbus::set_property(service().monitor().connection(), bluez, first->path.c_str(),
-                                     adapter_interface, "Powered",
-                                     g_variant_new_boolean(powered ? TRUE : FALSE));
+  const bool ok = set_property(service().monitor().connection(), first->path, adapter_interface, "Powered",
+                               Value::boolean(powered));
   if (ok) service().monitor().schedule_refresh();
   return ok;
 }
@@ -219,9 +209,8 @@ bool disconnect(const std::string& device) {
 
 bool pair(const std::string& device) {
   if (!known(device)) return false;
-  service().device_call(device, "Pair", [device](GDBusConnection* bus) {
-    dbus::set_property(bus, bluez, device.c_str(), device_interface, "Trusted",
-                       g_variant_new_boolean(TRUE));
+  service().device_call(device, "Pair", [device](dbus::Connection* bus) {
+    set_property(bus, device, device_interface, "Trusted", Value::boolean(true));
     service().device_call(device, "Connect");
   });
   return true;
@@ -231,9 +220,8 @@ bool forget(const std::string& device) {
   const auto devices = service().snapshot().devices;
   const auto found = std::ranges::find(devices, device, &Device::path);
   if (found == devices.end()) return false;
-  const bool ok = static_cast<bool>(dbus::call(
-      service().monitor().connection(), bluez, found->adapter.c_str(), adapter_interface,
-      "RemoveDevice", g_variant_new("(o)", device.c_str())));
+  const bool ok = invoke(service().monitor().connection(), found->adapter, adapter_interface, "RemoveDevice",
+                         {Value::object_path(device)});
   if (ok) service().monitor().schedule_refresh();
   return ok;
 }

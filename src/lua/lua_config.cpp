@@ -791,6 +791,15 @@ int add_anchor_layout(lua_State* lua) {
 
 // --- surfaces and session --------------------------------------------------
 
+// color_depth = 8, 10 or 16.
+ColorDepth color_depth_field(lua_State* lua, int index) {
+  const auto bits = optional_number(lua, index, "color_depth");
+  if (!bits || *bits == 8) return ColorDepth::bits8;
+  if (*bits == 10) return ColorDepth::bits10;
+  if (*bits == 16) return ColorDepth::bits16;
+  throw std::invalid_argument("color_depth must be 8, 10 or 16");
+}
+
 int configure_toplevel(lua_State* lua) {
   luaL_checktype(lua, 1, LUA_TTABLE);
   ToplevelProps props;
@@ -799,6 +808,7 @@ int configure_toplevel(lua_State* lua) {
   lua_getfield(lua, 1, "refresh_interval");
   props.refresh_interval = lua_isnil(lua, -1) ? 1.0 : luaL_checknumber(lua, -1);
   lua_pop(lua, 1);
+  props.color_depth = color_depth_field(lua, 1);
   props.title = string_field(lua, 1, "title", props.title);
   props.app_id = string_field(lua, 1, "app_id", props.app_id);
   current_ui(lua).toplevel(props);
@@ -834,6 +844,7 @@ int configure_surface(lua_State* lua) {
   props.on_activated = focus_handler(function_field(lua, 1, "on_activated"));
   props.on_dismiss = focus_handler(function_field(lua, 1, "on_dismiss"));
   props.refresh_interval = optional_number(lua, 1, "refresh_interval").value_or(1.0);
+  props.color_depth = color_depth_field(lua, 1);
   lua_getfield(lua, 1, "input_regions");
   if (!lua_isnil(lua, -1)) {
     luaL_checktype(lua, -1, LUA_TTABLE);
@@ -880,7 +891,8 @@ int configure_session_lock(lua_State* lua) {
 
 int configure_lock_surface(lua_State* lua) {
   luaL_checktype(lua, 1, LUA_TTABLE);
-  current_ui(lua).lock_surface({optional_number(lua, 1, "width"), optional_number(lua, 1, "height")});
+  current_ui(lua).lock_surface(
+      {optional_number(lua, 1, "width"), optional_number(lua, 1, "height"), color_depth_field(lua, 1)});
   return 0;
 }
 

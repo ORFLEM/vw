@@ -31,11 +31,19 @@ struct Snapshot {
   const ProfilesBus* profiles_bus = nullptr;
 };
 
-Device fetch_device(GDBusConnection* connection, const std::string& path) {
+// org.freedesktop.DBus.Properties.GetAll; the a{sv} dictionary or nothing.
+std::optional<dbus::Value> get_all(dbus::Connection* bus, const char* name, const std::string& path,
+                                   const char* interface) {
+  if (bus == nullptr) return std::nullopt;
+  return bus->call_value(dbus::Message::method_call(name, path, "org.freedesktop.DBus.Properties", "GetAll",
+                                                    {dbus::Value::string(interface)}));
+}
+
+Device fetch_device(dbus::Connection* connection, const std::string& path) {
   Device device;
   device.path = path;
-  auto properties = dbus::get_all(connection, upower_name, path.c_str(), device_interface);
-  GVariant* map = properties.get();
+  const auto properties = get_all(connection, upower_name, path, device_interface);
+  const dbus::Value* map = properties ? &*properties : nullptr;
   device.native_path = dbus::get_string(map, "NativePath");
   device.vendor = dbus::get_string(map, "Vendor");
   device.model = dbus::get_string(map, "Model");
@@ -57,7 +65,7 @@ Device fetch_device(GDBusConnection* connection, const std::string& path) {
 
 class Service {
  public:
-  Service() : monitor_(G_BUS_TYPE_SYSTEM, [this](GDBusConnection* bus) { refresh(bus); }) {
+  Service() : monitor_(dbus::Bus::system, [this](dbus::Connection* bus) { refresh(bus); }) {
     monitor_.watch(upower_name);
     for (const auto& bus : profiles_buses) monitor_.watch(bus.name);
   }
@@ -73,41 +81,28 @@ class Service {
   }
 
  private:
-  void refresh(GDBusConnection* bus) {
+  void refresh(dbus::Connection* bus) {
     Snapshot next;
-    auto manager = dbus::get_all(bus, upower_name, upower_path, upower_name);
-    next.available = static_cast<bool>(manager);
-    next.on_battery = dbus::get_bool(manager.get(), "OnBattery");
+    const auto manager = get_all(bus, upower_name, upower_path, upower_name);
+    next.available = manager.has_value();
+    next.on_battery = dbus::get_bool(manager ? &*manager : nullptr, "OnBattery");
     if (next.available) {
-      if (auto display = dbus::call(bus, upower_name, upower_path, upower_name,
-                                    "GetDisplayDevice", nullptr, "(o)")) {
-        Device device = fetch_device(bus, dbus::string_of(
-            dbus::adopt(g_variant_get_child_value(display.get(), 0)).get()));
+      if (const auto display = bus->call_value(dbus::Message::method_call(upower_name, upower_path, upower_name,
+                                                                          "GetDisplayDevice"))) {
+        Device device = fetch_device(bus, std::string(display->str()));
         if (device.present) next.display = std::move(device);
       }
-      if (auto list = dbus::call(bus, upower_name, upower_path, upower_name,
-                                 "EnumerateDevices", nullptr, "(ao)")) {
-        GVariantIter* iter = nullptr;
-        const gchar* path = nullptr;
-        g_variant_get(list.get(), "(ao)", &iter);
-        while (g_variant_iter_next(iter, "&o", &path))
-          next.devices.push_back(fetch_device(bus, path));
-        g_variant_iter_free(iter);
-      }
+      if (const auto list = bus->call_value(dbus::Message::method_call(upower_name, upower_path, upower_name,
+                                                                       "EnumerateDevices")))
+        for (const std::string& path : list->string_list()) next.devices.push_back(fetch_device(bus, path));
     }
     for (const auto& candidate : profiles_buses) {
-      auto properties = dbus::get_all(bus, candidate.name, candidate.path, candidate.name);
+      const auto properties = get_all(bus, candidate.name, candidate.path, candidate.name);
       if (!properties) continue;
       next.profiles_bus = &candidate;
-      next.profile = dbus::get_string(properties.get(), "ActiveProfile");
-      auto list = dbus::lookup(properties.get(), "Profiles");
-      if (list && g_variant_is_of_type(list.get(), G_VARIANT_TYPE("aa{sv}"))) {
-        const gsize count = g_variant_n_children(list.get());
-        for (gsize index = 0; index < count; ++index) {
-          auto entry = dbus::adopt(g_variant_get_child_value(list.get(), index));
-          next.profiles.push_back(dbus::get_string(entry.get(), "Profile"));
-        }
-      }
+      next.profile = dbus::get_string(&*properties, "ActiveProfile");
+      if (const dbus::Value* list = properties->find("Profiles"); list != nullptr && list->is("aa{sv}"))
+        for (const dbus::Value& entry : list->items) next.profiles.push_back(dbus::get_string(&entry, "Profile"));
       break;
     }
     std::lock_guard lock(mutex_);
@@ -137,9 +132,14 @@ bool set_profile(std::string_view name) {
   const Snapshot snapshot = service().snapshot();
   if (snapshot.profiles_bus == nullptr) return false;
   const std::string value(name);
-  const bool ok = dbus::set_property(service().monitor().connection(), snapshot.profiles_bus->name,
-                                     snapshot.profiles_bus->path, snapshot.profiles_bus->name,
-                                     "ActiveProfile", g_variant_new_string(value.c_str()));
+  dbus::Connection* bus = service().monitor().connection();
+  const bool ok = bus != nullptr &&
+      bus->call(dbus::Message::method_call(snapshot.profiles_bus->name, snapshot.profiles_bus->path,
+                                           "org.freedesktop.DBus.Properties", "Set",
+                                           {dbus::Value::string(snapshot.profiles_bus->name),
+                                            dbus::Value::string("ActiveProfile"),
+                                            dbus::Value::variant(dbus::Value::string(value))}))
+          .has_value();
   if (ok) service().monitor().schedule_refresh();
   return ok;
 }

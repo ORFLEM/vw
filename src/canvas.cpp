@@ -1,9 +1,9 @@
 #include "vw/canvas.hpp"
 #include "vw/animation.hpp"
+#include "image_decode_internal.hpp"
 
 #include <quickjs.h>
 #include <cairo.h>
-#include <gtk/gtk.h>
 #include <pango/pangocairo.h>
 
 #include <algorithm>
@@ -133,7 +133,7 @@ class Canvas {
           static_cast<std::uint32_t>(pixel[0]) << 16U | static_cast<std::uint32_t>(pixel[3]) << 24U;
     }
     bitmap_ = std::make_unique<Bitmap>(Bitmap{
-        width_, height_, std::make_shared<const std::vector<std::uint32_t>>(std::move(pixels))});
+        width_, height_, std::make_shared<const std::vector<std::uint32_t>>(std::move(pixels)), {}});
     return *bitmap_;
   }
 
@@ -217,11 +217,11 @@ class Canvas {
     return result;
   }
   void paint(JSValueConst object, bool outline) {
-    GdkRGBA color;
     const auto style = property(object, outline ? "strokeStyle" : "fillStyle");
-    if (!gdk_rgba_parse(&color, style.c_str())) throw std::invalid_argument("unsupported canvas color: " + style);
+    const auto color = detail::parse_css_color(style);
+    if (!color) throw std::invalid_argument("unsupported canvas color: " + style);
     const double alpha = std::clamp(number_property(object, "globalAlpha"), 0.0, 1.0);
-    cairo_set_source_rgba(cairo_, color.red, color.green, color.blue, color.alpha * alpha);
+    cairo_set_source_rgba(cairo_, (*color)[0], (*color)[1], (*color)[2], (*color)[3] * alpha);
     const auto composite = property(object, "globalCompositeOperation");
     cairo_operator_t mode;
     if (composite == "source-over") mode = CAIRO_OPERATOR_OVER;

@@ -479,7 +479,7 @@ struct Evaluator {
 
 enum class Type {
   number, integer, size, boolean, string, strings, color, handler, input, padding,
-  anchor, layer, justify, align, weight, fit, text_align, gradient,
+  anchor, layer, justify, align, weight, fit, text_align, gradient, color_depth,
 };
 
 enum class Kind {
@@ -509,7 +509,8 @@ const std::vector<ElementSpec>& elements() {
   static const std::vector<ElementSpec> table{
       {"vw.ui", "Surface", Kind::surface,
        {{"width", number}, {"height", number}, {"anchor", anchor}, {"layer", layer},
-        {"exclusive_zone", integer}, {"namespace", string}, {"refresh", number}, {"output", string}}, ""},
+        {"exclusive_zone", integer}, {"namespace", string}, {"refresh", number}, {"output", string},
+        {"color_depth", color_depth}}, ""},
       {"vw.ui", "Rectangle", Kind::rectangle,
        {{"width", number}, {"height", number}, {"radius", number}, {"color", color}, {"bg", color},
         {"color2", color}, {"gradient", gradient}, {"border_width", number}, {"border_color", color},
@@ -583,6 +584,7 @@ const std::vector<std::string_view>& choices(Type type) {
       {Type::fit, {"stretch", "contain", "cover"}},
       {Type::text_align, {"start", "center", "end"}},
       {Type::gradient, {"none", "horizontal", "vertical"}},
+      {Type::color_depth, {"bits8", "bits10", "bits16"}},
   };
   return table.at(type);
 }
@@ -981,6 +983,11 @@ class Builder {
         else if (name == "namespace") p.surface_namespace = value.text();
         else if (name == "refresh") p.refresh_interval = value.number();
         else if (name == "output") p.output = value.text();
+        else if (name == "color_depth") {
+          const auto& text = value.text();
+          p.color_depth = text == "bits16" ? vw::ColorDepth::bits16
+                        : text == "bits10" ? vw::ColorDepth::bits10 : vw::ColorDepth::bits8;
+        }
         return;
       }
       case Kind::rectangle: {

@@ -1011,6 +1011,7 @@ void Ui::surface(const SurfaceProps& props) {
   scene_.exclusive_zone = props.exclusive_zone;
   scene_.margin = props.margin;
   scene_.surface_namespace = props.surface_namespace;
+  scene_.color_depth = props.color_depth;
   scene_.output = props.output;
   if (!std::isfinite(props.refresh_interval) || props.refresh_interval < 0.008 ||
       props.refresh_interval > 3600)
@@ -1045,6 +1046,7 @@ void Ui::toplevel(const ToplevelProps& props) {
   scene_.title = props.title;
   scene_.app_id = props.app_id;
   scene_.decorations = props.decorations;
+  scene_.color_depth = props.color_depth;
   scene_.on_closed = props.on_close;
 }
 
@@ -1075,6 +1077,7 @@ void Ui::lock_surface(const LockSurfaceProps& props) {
   const std::uint32_t height = surface_dimension(
       props.height.value_or(static_cast<float>(context.height)), "lock surface");
   scene_.lock_surface = true;
+  scene_.color_depth = props.color_depth;
   scene_.toplevel_width = context.output.empty() ? width : context.width;
   scene_.toplevel_height = context.output.empty() ? height : context.height;
   scene_.lock_output = context.output;

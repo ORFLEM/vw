@@ -1,4 +1,5 @@
 #include "vw/text.hpp"
+#include "text_internal.hpp"
 
 #include <cairo.h>
 #include <fontconfig/fontconfig.h>
@@ -593,5 +594,36 @@ std::pair<float, float> add_text(Scene& scene, std::string_view text,
   scene.rasters.push_back(std::move(raster));
   return {bitmap->metrics.width, bitmap->metrics.bottom - bitmap->metrics.top};
 }
+
+namespace detail {
+
+TextImage rasterize_text(std::string_view text, std::string_view font, float size, int weight,
+                         const std::array<float, 4>& color) {
+  if (!std::isfinite(size) || size <= 0.0F) throw std::invalid_argument("text size must be positive and finite");
+  TextImage image;
+  if (text.empty()) return image;
+  const bool alpha_mask = !contains_color_glyph(text);
+  TextKey key;
+  key.text.assign(text);
+  key.family.assign(font.empty() ? "sans-serif" : font);
+  key.size_bits = std::bit_cast<std::uint32_t>(size);
+  key.max_width_bits = std::bit_cast<std::uint32_t>(0.0F);
+  key.color_rgb = alpha_mask ? 0U : pack_rgb(color);
+  key.weight = weight;
+  key.align = TextAlign::start;
+  key.ellipsize = TextEllipsize::none;
+  const auto bitmap = text_renderer().render(key, size, 0.0F, color);
+  image.width = bitmap->width;
+  image.height = bitmap->height;
+  image.pixels = bitmap->pixels;
+  image.alpha_mask = bitmap->alpha_mask;
+  image.origin_x = -bitmap->offset_x * text_scale;
+  image.baseline_y = -(bitmap->offset_y + bitmap->metrics.top) * text_scale;
+  image.scale = text_scale;
+  image.advance = bitmap->metrics.width;
+  return image;
+}
+
+}  // namespace detail
 
 }  // namespace vw

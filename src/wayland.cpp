@@ -156,6 +156,7 @@ bool same_presentation(const Scene& a, const Scene& b) {
          a.selective_input == b.selective_input && a.focus_grab == b.focus_grab &&
          a.input_regions == b.input_regions && a.surface_namespace == b.surface_namespace &&
          a.title == b.title && a.app_id == b.app_id && a.decorations == b.decorations &&
+         a.color_depth == b.color_depth &&
          a.rectangles == b.rectangles &&
          a.rasters == b.rasters;
 }
@@ -250,6 +251,15 @@ void WaylandWidget::discover_globals() {
       generated::zwp_linux_dmabuf_v1_interface, std::min(3U, globals.dmabuf_version));
   if (compositor_ == nullptr || dmabuf_ == nullptr)
     throw std::runtime_error("could not bind required Wayland globals");
+  struct DmabufEvents {
+    WaylandWidget* widget;
+    void format(client::Proxy&, std::uint32_t format) { widget->dmabuf_formats_.insert(format); }
+    void modifier(client::Proxy&, std::uint32_t format, std::uint32_t, std::uint32_t) {
+      widget->dmabuf_formats_.insert(format);
+    }
+  };
+  dmabuf_->set_observer(generated::zwp_linux_dmabuf_v1_observer(DmabufEvents{this}));
+  if (!display_->roundtrip()) throw std::runtime_error("Wayland linux-dmabuf roundtrip failed");
   // Over vw's surfaces the cursor is vw's to set; cursor-shape names it and
   // the compositor draws it from its theme.
   if (globals.cursor_shape_manager != 0)
@@ -667,6 +677,15 @@ void WaylandWidget::create_buffer(const Frame& frame) {
 
 void WaylandWidget::create_buffer_for(const Frame& frame, client::Proxy*& target) {
   using namespace zwayland;
+  // A deeper buffer than 8 bits needs the compositor's word that it takes it.
+  constexpr std::uint32_t drm_format_abgr8888 = 0x34324241U;
+  if (frame.drm_format != drm_format_abgr8888 && !dmabuf_formats_.empty() &&
+      !dmabuf_formats_.contains(frame.drm_format)) {
+    const char name[5] = {static_cast<char>(frame.drm_format), static_cast<char>(frame.drm_format >> 8U),
+                          static_cast<char>(frame.drm_format >> 16U), static_cast<char>(frame.drm_format >> 24U), '\0'};
+    throw std::runtime_error(std::string("the compositor does not accept ") + name +
+                             " buffers; use an 8-bit color_depth for this surface");
+  }
   if (target != nullptr) {
     generated::wl_buffer_destroy(*display_, target->id);
     target = nullptr;
@@ -679,10 +698,9 @@ void WaylandWidget::create_buffer_for(const Frame& frame, client::Proxy*& target
       *display_, params->id, frame.fd, 0, 0, frame.stride,
       static_cast<std::uint32_t>(frame.modifier >> 32U),
       static_cast<std::uint32_t>(frame.modifier));
-  constexpr std::uint32_t drm_format_abgr8888 = 0x34324241U;
   const std::uint32_t buffer_id = generated::zwp_linux_buffer_params_v1_create_immed(
       *display_, params->id, static_cast<std::int32_t>(frame.width),
-      static_cast<std::int32_t>(frame.height), drm_format_abgr8888, 0);
+      static_cast<std::int32_t>(frame.height), frame.drm_format, 0);
   target = display_->find_proxy(buffer_id);
   generated::zwp_linux_buffer_params_v1_destroy(*display_, params->id);
   if (target == nullptr) throw std::runtime_error("could not create wl_buffer");
