@@ -126,7 +126,7 @@ const std::map<std::string, std::string>& choices(Type type) {
                       {"semibold", "vw::weight::semibold"}, {"bold", "vw::weight::bold"},
                       {"black", "vw::weight::black"}}},
       {Type::fit, {{"stretch", "vw::ImageFit::stretch"}, {"contain", "vw::ImageFit::contain"},
-                   {"cover", "vw::ImageFit::cover"}}},
+                   {"cover", "vw::ImageFit::cover"}, {"aspect", "vw::ImageFit::aspect"}}},
       {Type::text_align, {{"start", "\"start\""}, {"center", "\"center\""}, {"end", "\"end\""}}},
       {Type::gradient, {{"none", "vw::Gradient::none"}, {"horizontal", "vw::Gradient::horizontal"},
                         {"vertical", "vw::Gradient::vertical"}}},

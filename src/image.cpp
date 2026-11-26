@@ -223,7 +223,7 @@ Fitted fit_image(const DecodedImage& source_image, float width, float height, Im
     const double box = static_cast<double>(width) / height;
     const double image = static_cast<double>(source->width) / source->height;
     Crop crop{0, 0, source->width, source->height};
-    if (fit == ImageFit::contain) {
+    if (fit == ImageFit::contain || fit == ImageFit::aspect) {
       if (image > box) height = static_cast<float>(width / image);
       else width = static_cast<float>(height * image);
     } else if (fit == ImageFit::cover && std::abs(image - box) > 1e-6) {
