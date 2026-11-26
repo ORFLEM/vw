@@ -323,6 +323,41 @@ std::vector<FittedBitmap>& fitted_bitmaps() {
 
 }  // namespace
 
+std::optional<std::pair<float, float>> image_size(const std::filesystem::path& path) {
+  if (path.empty()) return std::nullopt;
+  try {
+    if (!is_svg(path)) {
+      const auto image = decode_image(path, 0, 0);
+      if (image->width <= 0 || image->height <= 0) return std::nullopt;
+      return std::pair{static_cast<float>(image->width), static_cast<float>(image->height)};
+    }
+    using Size = std::optional<std::pair<float, float>>;
+    struct Entry { std::filesystem::file_time_type modified; Size size; };
+    static std::mutex mutex;
+    static std::unordered_map<std::string, Entry> cache;
+    const auto modified = std::filesystem::last_write_time(path);
+    const auto key = path.string();
+    std::lock_guard lock(mutex);
+    if (const auto it = cache.find(key); it != cache.end() && it->second.modified == modified)
+      return it->second.size;
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return std::nullopt;
+    const std::vector<std::uint8_t> bytes{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+    const auto intrinsic = detail::svg_intrinsic_size(bytes);
+    Size size;
+    if (intrinsic && intrinsic->first > 0 && intrinsic->second > 0 &&
+        std::isfinite(intrinsic->first) && std::isfinite(intrinsic->second)) {
+      const float w = static_cast<float>(intrinsic->first), h = static_cast<float>(intrinsic->second);
+      if (std::isfinite(w) && std::isfinite(h) && w > 0 && h > 0) size = std::pair{w, h};
+    }
+    if (cache.size() >= 256) cache.clear();
+    cache.insert_or_assign(key, Entry{modified, size});
+    return size;
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
+}
+
 std::pair<float, float> add_image(Scene& scene, const Bitmap& bitmap,
                                   float width, float height, const Rectangle& style,
                                   ImageFit fit) {
