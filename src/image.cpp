@@ -16,13 +16,72 @@ namespace vw {
 namespace {
 
 // Decoded pixels: eight bits a channel, or sixteen when the file has more.
+// One level of an image: full size, or a halving of the one before.
+struct Level {
+  int width = 0;
+  int height = 0;
+  Pixels rgba;
+  DeepPixels rgba16;
+
+  bool empty() const { return !rgba && !rgba16; }
+};
+
 struct DecodedImage {
   int width = 0;
   int height = 0;
   std::filesystem::file_time_type modified;
+  // Full size; empty for a huge image kept only as its smaller levels.
   Pixels rgba;
   DeepPixels rgba16;
+  // Half, quarter, ... size, down to about 32 pixels. Fitting reads the
+  // smallest one that still covers the target, so an animated size costs
+  // the target's pixels rather than the whole image's.
+  std::vector<Level> mips;
 };
+
+// The 2x2 average of a level, edges repeated for odd sizes.
+template <typename Pixel>
+std::vector<Pixel> halve(const std::vector<Pixel>& source, int width, int height, int half_width, int half_height) {
+  constexpr int bits = sizeof(Pixel) * 2;
+  constexpr Pixel mask = (Pixel{1} << bits) - 1;
+  std::vector<Pixel> result(static_cast<std::size_t>(half_width) * static_cast<std::size_t>(half_height));
+  for (int y = 0; y < half_height; ++y) {
+    const auto row0 = static_cast<std::size_t>(std::min(2 * y, height - 1)) * static_cast<std::size_t>(width);
+    const auto row1 = static_cast<std::size_t>(std::min(2 * y + 1, height - 1)) * static_cast<std::size_t>(width);
+    for (int x = 0; x < half_width; ++x) {
+      const auto x0 = static_cast<std::size_t>(std::min(2 * x, width - 1));
+      const auto x1 = static_cast<std::size_t>(std::min(2 * x + 1, width - 1));
+      const Pixel a = source[row0 + x0], b = source[row0 + x1], c = source[row1 + x0], d = source[row1 + x1];
+      Pixel out = 0;
+      for (int channel = 0; channel < 4; ++channel) {
+        const int shift = channel * bits;
+        const Pixel sum = ((a >> shift) & mask) + ((b >> shift) & mask) + ((c >> shift) & mask) + ((d >> shift) & mask);
+        out |= ((sum + 2) / 4) << shift;
+      }
+      result[static_cast<std::size_t>(y) * static_cast<std::size_t>(half_width) + static_cast<std::size_t>(x)] = out;
+    }
+  }
+  return result;
+}
+
+std::vector<Level> build_mips(const Level& full) {
+  std::vector<Level> mips;
+  const Level* previous = &full;
+  while (previous->width > 64 || previous->height > 64) {
+    Level next;
+    next.width = std::max(1, (previous->width + 1) / 2);
+    next.height = std::max(1, (previous->height + 1) / 2);
+    if (previous->rgba16)
+      next.rgba16 = std::make_shared<const std::vector<std::uint64_t>>(
+          halve(*previous->rgba16, previous->width, previous->height, next.width, next.height));
+    else
+      next.rgba = std::make_shared<const std::vector<std::uint32_t>>(
+          halve(*previous->rgba, previous->width, previous->height, next.width, next.height));
+    mips.push_back(std::move(next));
+    previous = &mips.back();
+  }
+  return mips;
+}
 
 bool is_svg(const std::filesystem::path& path) {
   std::string extension = path.extension().string();
@@ -61,11 +120,19 @@ std::shared_ptr<const DecodedImage> decode_image(const std::filesystem::path& pa
   decoded->height = raster.height;
   if (raster.deep()) decoded->rgba16 = std::make_shared<const std::vector<std::uint64_t>>(std::move(raster.rgba16));
   else decoded->rgba = std::make_shared<const std::vector<std::uint32_t>>(std::move(raster.rgba));
-  // Huge photos (wallpapers) are only ever drawn fitted, and the fitted
-  // result is cached: keeping a 100 MB decode around would only cost memory.
+  decoded->mips = build_mips({decoded->width, decoded->height, decoded->rgba, decoded->rgba16});
+  // Huge photos keep only their smaller levels in the cache: a 100 MB decode
+  // would cost memory, while re-decoding on every new size made animated
+  // wallpaper cards stutter.
   constexpr std::size_t retained_pixels = 16U * 1024U * 1024U;
-  if (static_cast<std::size_t>(raster.width) * static_cast<std::size_t>(raster.height) <= retained_pixels)
+  if (static_cast<std::size_t>(raster.width) * static_cast<std::size_t>(raster.height) <= retained_pixels) {
     cache[key] = decoded;
+  } else {
+    auto proxy = std::make_shared<DecodedImage>(*decoded);
+    proxy->rgba = {};
+    proxy->rgba16 = {};
+    cache[key] = proxy;
+  }
   return decoded;
 }
 
@@ -136,19 +203,16 @@ std::vector<std::pair<std::string, Fitted>>& fitted_cache() {
 Fitted fit_image(const DecodedImage& source_image, float width, float height, ImageFit fit) {
   const DecodedImage* source = &source_image;
   const bool sized = width > 0 && height > 0;
-  std::uint32_t source_width = static_cast<std::uint32_t>(source->width);
-  std::uint32_t source_height = static_cast<std::uint32_t>(source->height);
-  Pixels pixels = source->rgba;
-  DeepPixels deep = source->rgba16;
-  const auto scale = [&](const Crop& crop, int target_width, int target_height) {
-    if (deep) {
-      deep = std::make_shared<const std::vector<std::uint64_t>>(
-          resample(*source->rgba16, source->width, crop, target_width, target_height));
-    } else {
-      pixels = std::make_shared<const std::vector<std::uint32_t>>(
-          resample(*source->rgba, source->width, crop, target_width, target_height));
-    }
-  };
+  // Every level, full size first when it is kept.
+  std::vector<Level> levels;
+  if (source->rgba || source->rgba16) levels.push_back({source->width, source->height, source->rgba, source->rgba16});
+  levels.insert(levels.end(), source->mips.begin(), source->mips.end());
+  if (levels.empty()) throw std::runtime_error("image has no pixels");
+  const Level& largest = levels.front();
+  std::uint32_t source_width = static_cast<std::uint32_t>(largest.width);
+  std::uint32_t source_height = static_cast<std::uint32_t>(largest.height);
+  Pixels pixels = largest.rgba;
+  DeepPixels deep = largest.rgba16;
   if (sized && source->width > 0 && source->height > 0) {
     const double box = static_cast<double>(width) / height;
     const double image = static_cast<double>(source->width) / source->height;
@@ -167,16 +231,41 @@ Fitted fit_image(const DecodedImage& source_image, float width, float height, Im
     }
     const int target_width = std::max(1, static_cast<int>(std::ceil(width)));
     const int target_height = std::max(1, static_cast<int>(std::ceil(height)));
-    if (crop.width > target_width || crop.height > target_height) {
-      const int scaled_width = std::min(crop.width, target_width);
-      const int scaled_height = std::min(crop.height, target_height);
-      scale(crop, scaled_width, scaled_height);
-      source_width = static_cast<std::uint32_t>(scaled_width);
-      source_height = static_cast<std::uint32_t>(scaled_height);
-    } else if (crop.width != source->width || crop.height != source->height) {
-      scale(crop, crop.width, crop.height);
-      source_width = static_cast<std::uint32_t>(crop.width);
-      source_height = static_cast<std::uint32_t>(crop.height);
+    // The crop in a level's pixels.
+    const auto crop_in = [&](const Level& level) {
+      const double sx = static_cast<double>(level.width) / source->width;
+      const double sy = static_cast<double>(level.height) / source->height;
+      Crop scaled{static_cast<int>(std::floor(crop.x * sx)), static_cast<int>(std::floor(crop.y * sy)),
+                  std::max(1, static_cast<int>(std::lround(crop.width * sx))),
+                  std::max(1, static_cast<int>(std::lround(crop.height * sy)))};
+      scaled.width = std::min(scaled.width, level.width - scaled.x);
+      scaled.height = std::min(scaled.height, level.height - scaled.y);
+      return scaled;
+    };
+    // The smallest level that still covers the target.
+    const Level* level = &levels.front();
+    for (const Level& candidate : levels) {
+      const Crop scaled = crop_in(candidate);
+      if (scaled.width < std::min(target_width, crop.width) || scaled.height < std::min(target_height, crop.height))
+        break;
+      level = &candidate;
+    }
+    const Crop scaled = crop_in(*level);
+    const int out_width = std::min(scaled.width, target_width);
+    const int out_height = std::min(scaled.height, target_height);
+    pixels = level->rgba;
+    deep = level->rgba16;
+    source_width = static_cast<std::uint32_t>(level->width);
+    source_height = static_cast<std::uint32_t>(level->height);
+    if (scaled.x != 0 || scaled.y != 0 || out_width != level->width || out_height != level->height) {
+      if (deep)
+        deep = std::make_shared<const std::vector<std::uint64_t>>(
+            resample(*level->rgba16, level->width, scaled, out_width, out_height));
+      else
+        pixels = std::make_shared<const std::vector<std::uint32_t>>(
+            resample(*level->rgba, level->width, scaled, out_width, out_height));
+      source_width = static_cast<std::uint32_t>(out_width);
+      source_height = static_cast<std::uint32_t>(out_height);
     }
   }
   const unsigned int output_width = static_cast<unsigned int>(
@@ -243,7 +332,7 @@ std::pair<float, float> add_image(Scene& scene, const Bitmap& bitmap,
   });
   if (found == cache.end()) {
     const DecodedImage source{static_cast<int>(bitmap.width), static_cast<int>(bitmap.height), {}, pixels,
-                              bitmap.rgba16};
+                              bitmap.rgba16, {}};
     if (cache.size() >= 16) cache.erase(cache.begin());
     cache.push_back({pixels, bitmap.rgba16, width, height, fit, fit_image(source, width, height, fit)});
   }
