@@ -198,10 +198,16 @@ std::vector<std::pair<std::string, Fitted>>& fitted_cache() {
 }
 
 
-// Crops and downscales `source` to width x height (either 0 keeps the
-// natural size) the way `fit` asks.
+// Crops and downscales `source` to width x height the way `fit` asks.
+// One omitted dimension preserves the aspect ratio; both keep natural size.
 Fitted fit_image(const DecodedImage& source_image, float width, float height, ImageFit fit) {
   const DecodedImage* source = &source_image;
+  if (source->width > 0 && source->height > 0) {
+    if (width > 0 && height <= 0)
+      height = std::max(1.0F, static_cast<float>(std::ceil(static_cast<double>(width) * source->height / source->width)));
+    else if (height > 0 && width <= 0)
+      width = std::max(1.0F, static_cast<float>(std::ceil(static_cast<double>(height) * source->width / source->height)));
+  }
   const bool sized = width > 0 && height > 0;
   // Every level, full size first when it is kept.
   std::vector<Level> levels;
@@ -348,7 +354,7 @@ std::pair<float, float> add_image(Scene& scene, const std::filesystem::path& pat
     push_fitted(scene, fitted, style);
     return std::pair{fitted.width, fitted.height};
   };
-  const bool sized = width > 0 && height > 0;
+  const bool sized = width > 0 || height > 0;
   std::string key;
   if (sized) {
     key = path.string() + '\x1f' + std::to_string(static_cast<int>(fit)) + '\x1f' +
